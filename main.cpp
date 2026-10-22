@@ -25,6 +25,7 @@
 #include <hardware/irq.h>
 #include <hardware/watchdog.h>
 #include <hardware/clocks.h>
+#include <hardware/vreg.h>
 #include <tusb.h>
 
 #include <string>
@@ -43,6 +44,14 @@
 #define IO_MASK_ROM_BANK         0b00001111
 
 #define DEFAULT_ROM disk_rom
+
+#if defined(BOARD_coco_proto_260402) || defined(BOARD_picorom_coco)
+#define COCO_BOARD
+// CTS also covers $8000-$BFFF in the CoCo 3's 32K external ROM mode; $FF00 up
+// is I/O whichever mode. Constants: the read path cannot afford loads.
+#define IS_ROM_READ(b) \
+  (!Mapper::isWrite(b) && 0x8000 <= (b).addr && (b).addr < BUS_ROM_TOP)
+#endif
 
 #define USE_IRQ 0
 
@@ -78,6 +87,19 @@ pio_sm_t state_machine[3];
 UserROM user_rom;
 Mapper mapper;
 
+#ifdef COCO_BOARD
+// Reads served since the cart was switched on. A BASIC signature probe reads
+// a handful; real execution reads thousands.
+volatile uint32_t served_reads = 0;
+
+// Inlined, the bank switch costs the read path its registers.
+static void __noinline __not_in_flash_func(cart_remap)(BusSignals bus)
+{
+  mapper.remap(bus);
+  return;
+}
+#endif
+
 #ifdef BOARD_coco_proto_260402
 // Power-on-like Program Pak boot: on user-ROM enable we point rom_ptr at the
 // .CCC (so $C000 != "DK" and the reset routine can't reload HDB-DOS), pulse
@@ -88,7 +110,7 @@ volatile uint32_t reset_assert_ms = 0;       // when core 0 asserted RESET
 volatile bool cart_toggle_active = false;    // core 0 toggles CART_PIN at ~60Hz
 volatile uint32_t cart_toggle_start_ms = 0;  // when the CART toggle started
 #define RESET_PULSE_MS 50                   // hold RESET low this long
-#define CART_TOGGLE_MS 1500                 // toggle CART this long after autostart
+#define CART_TOGGLE_MS 1500                 // toggle CART at most this long after autostart
 #endif // BOARD_coco_proto_260402
 
 #define SERIAL_BEGIN_DELAY 100
@@ -224,6 +246,27 @@ void __time_critical_func(romulan)(void)
     if (!user_rom.isActive() && rom_ptr != DEFAULT_ROM)
       rom_ptr = DEFAULT_ROM;
 
+#ifdef COCO_BOARD
+    // Once the cart is on, only its reads and bank writes concern us, and the
+    // read path has no time for the checks below.
+    if (user_rom.isActive()) {
+      if (IS_ROM_READ(bus)) {
+        bus.data = rom_ptr[mapper.calculateOffset(bus, user_rom)];
+        pio_put_fifo(PSM_READ, bus.data);
+        served_reads = served_reads + 1;
+      }
+      else if (mapper.isRemap(bus))
+        cart_remap(bus);
+      last_bus_state = bus.combined;
+      continue;
+    }
+    // A ROM must not drive the bus while the CPU is writing.
+    if (Mapper::isWrite(bus) && !(IO_BASE <= bus.addr && bus.addr < IO_TOP)) {
+      last_bus_state = bus.combined;
+      continue;
+    }
+#endif
+
     // FIXME - only check IO_BASE if rom_ptr == ROM
     if (!user_rom.isActive() && IO_BASE <= bus.addr && bus.addr < IO_TOP) {
       unsigned io_reg = (bus.addr - IO_BASE) & 0x3;
@@ -254,6 +297,9 @@ void __time_critical_func(romulan)(void)
             user_rom.activate();
             mapper.activate();
             rom_ptr = user_rom.activeBase;
+#ifdef COCO_BOARD
+            served_reads = 0;
+#endif
             if (bus.data & IO_FLAG_AUTOSTART_ENABLE) {
 #ifdef BOARD_coco_proto_260402
               // Enable auto start (CoCo)
@@ -374,6 +420,18 @@ bool process_command(ByteBuffer &buffer)
   case FUJICMD_CLOSE:
     {
       size_t size = user_rom.close();
+#ifdef COCO_BOARD
+      // The host sends no ROM type, so classify by size. It cannot tell a
+      // banked 32K cart from a flat one; none is known.
+      if (mapper.type() == ROM_TYPE_UNKNOWN && size > 0) {
+        if (size <= SIZE_32K)
+          mapper.setROMType(ROM_TYPE_COCO_32K_FF90);
+        else if (size <= 2 * SIZE_32K)
+          mapper.setROMType(ROM_TYPE_COCO_64K_FF90);
+        else
+          mapper.setROMType(ROM_TYPE_COCO_128K_FF90);
+      }
+#endif
       if (size > 0)
         mapper.setROMSize(size);
       sendReplyPacket(packet->device(), size > 0, nullptr, 0);
@@ -409,7 +467,17 @@ int main()
   ByteBuffer command_buf;
 
 
+#ifdef BOARD_coco_proto_260402
+  // Needed to serve the cart bus at 2MHz. Voltage must come up first and
+  // settle; the clock alone leaves the chip unstable. Non-panicking form so a
+  // failed request cannot hang before USB is up.
+  vreg_set_voltage(VREG_VOLTAGE_1_20);
+  sleep_ms(10);
+  if (!set_sys_clock_khz(300000, false))
+    set_sys_clock_khz(250000, true);
+#else
   set_sys_clock_khz(250000, true);
+#endif
 
 #ifdef LED_PIN
   gpio_init(LED_PIN);
@@ -456,12 +524,12 @@ int main()
       reset_active = false;
     }
     // Toggle CART at ~60Hz (period ~16ms) like a Program Pak's CART line so the
-    // reset routine's cart-FIRQ check fires and autostarts the .CCC. Stop after
-    // the autostart window and park CART high (deasserted) so leftover CART
-    // FIRQs don't disrupt a later CFGLOAD/CONFIG.BIN boot. Unsigned delta is
-    // wraparound-safe.
+    // reset routine's cart-FIRQ check fires and autostarts the .CCC. Stop once
+    // the cart is running or the autostart window has passed, and park CART
+    // high (deasserted) so leftover CART FIRQs don't disrupt a later
+    // CFGLOAD/CONFIG.BIN boot. Unsigned delta is wraparound-safe.
     if (cart_toggle_active) {
-      if (now - cart_toggle_start_ms >= CART_TOGGLE_MS) {
+      if (served_reads > 256 || now - cart_toggle_start_ms >= CART_TOGGLE_MS) {
         cart_toggle_active = false;
         gpio_put(CART_PIN, 1);
       }
