@@ -40,6 +40,7 @@
 */
 
 #define MAX_WINDOWS 8
+#define MAX_PAGES 64 // finest window the offset table can hold: 1K
 
 class Mapper
 {
@@ -71,7 +72,25 @@ private:
 
   fujiROMType_t _type = ROM_TYPE_UNKNOWN;
 
+  // windowOffset() per window-sized page: the CoCo can't afford it per read.
+  int32_t delta[MAX_PAGES] {};
+
+  inline unsigned windowOffset(unsigned addr) {
+    unsigned rom_offset = mirrored(addr);
+    int window = selectedWindow(rom_offset);
+    rom_offset += (windows[window].bank - window) * windowSize;
+    return rom_offset - windowBase;
+  }
+
+  inline void resolve(unsigned base, unsigned top) {
+    for (unsigned addr = base; addr < std::min(top, 0x10000u); addr += windowSize)
+      delta[addr >> windowShift] = windowOffset(addr) - addr;
+    return;
+  }
+
 public:
+  fujiROMType_t type(void) const { return _type; }
+
   void setROMType(fujiROMType_t type) {
     _type = type;
 
@@ -211,6 +230,47 @@ public:
       }
       break;
 
+    case ROM_TYPE_COCO_32K_FF90:
+      {
+        // A14 is inverted: the image's first 16K is at $C000 and its second
+        // at $8000, a mirror of where it would sit above $FFFF.
+        addWindow({
+            .window_base = 0xC000,
+            .window_top  = 0x10000,
+          });
+        addWindow({
+            .window_base = 0x10000,
+            .window_top  = 0x14000,
+          });
+
+        addMirror({
+            .mirror_base = 0x8000,
+            .mirror_top  = 0xC000,
+            .source      = 0x10000,
+          });
+      }
+      break;
+
+    case ROM_TYPE_COCO_64K_FF90:
+    case ROM_TYPE_COCO_128K_FF90:
+      {
+        // GMC. Its register is every even address of $FF40-$FF5F, but the
+        // odd ones are its sound chip and carts only write $FF40.
+        addWindow({
+            .reg_base    = 0xFF40,
+            .reg_top     = 0xFF41,
+            .window_base = 0xC000,
+            .window_top  = 0x10000,
+          });
+
+        addMirror({
+            .mirror_base = 0x8000,
+            .mirror_top  = 0xC000,
+            .source      = 0xC000,
+          });
+      }
+      break;
+
     default:
       break;
     }
@@ -282,6 +342,10 @@ public:
     __compiler_memory_barrier();
     for (unsigned idx = 0; idx < windowCount; idx++)
       windows[idx].bank = idx;
+    if (windowCount)
+      resolve(0, 0x10000);
+    else
+      std::fill(std::begin(delta), std::end(delta), -(int32_t)BUS_ROM_BASE);
     return;
   }
 
@@ -325,8 +389,23 @@ public:
 
   inline void remap(BusSignals bus) {
     MapperWindow *window = selectedRegister(bus);
-    if (window != nullptr)
+    if (window != nullptr) {
       window->bank = bus.data & (bankCount - 1);
+
+      // Only this window's pages and their mirrors: the next fetch can come
+      // from the new bank.
+      int32_t d = (window->bank - (int)(window - windows.data())) * windowSize - windowBase;
+      for (unsigned addr = window->window_base; addr < window->window_top; addr += windowSize)
+        delta[addr >> windowShift] = d;
+      for (unsigned idx = 0; idx < mirrorCount; idx++) {
+        const MapperMirror &m = mirrors[idx];
+        for (unsigned addr = m.mirror_base; addr < m.mirror_top; addr += windowSize) {
+          unsigned src = addr + m.source - m.mirror_base;
+          if (window->window_base <= src && src < window->window_top)
+            delta[addr >> windowShift] = d + m.source - m.mirror_base;
+        }
+      }
+    }
     return;
   }
 
@@ -339,16 +418,9 @@ public:
   }
 
   inline unsigned calculateOffset(BusSignals bus, UserROM &user_rom) {
-    unsigned rom_offset = bus.addr;
-    if (user_rom.isActive()) {
-      rom_offset = mirrored(rom_offset);
-      int window = selectedWindow(rom_offset);
-      rom_offset += (windows[window].bank - window) * windowSize;
-      rom_offset -= windowBase;
-    }
-    else
-      rom_offset -= BUS_ROM_BASE;
-    return rom_offset;
+    if (user_rom.isActive())
+      return bus.addr + delta[bus.addr >> windowShift];
+    return bus.addr - BUS_ROM_BASE;
   }
 };
 
