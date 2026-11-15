@@ -6,7 +6,7 @@
 #include <hardware/sync.h>
 #include <hardware/watchdog.h>
 
-#define DIAG_PIN 37
+#define DIAG_PIN 40
 #define DIAG_BIT_US 104
 
 volatile uint32_t diag_bf[BF_CAP];

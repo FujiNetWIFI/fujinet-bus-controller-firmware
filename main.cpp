@@ -2,6 +2,7 @@
 #include "board_defs.h"
 #include "UserROM.h"
 #include "Mapper.h"
+#include "CoCoDisk.h"
 #include "FujiBusPacket.h"
 #include "fujiDeviceID.h"
 #include "fujiCommandID.h"
@@ -59,11 +60,15 @@
 #define PSM_READ    1
 #if !defined(BOARD_picorom_coco) && !defined(BOARD_picorom_msx) && !defined(BOARD_msxrp2350)
 #define PSM_SENDBUS 2
+#define PSM_BUS     PSM_SENDBUS
+#else
+#define PSM_BUS     PSM_WAITSEL
 #endif
 
 pio_sm_t state_machine[3];
 #define pio_get_fifo(n) pio_sm_get_blocking(state_machine[n].pio, state_machine[n].sm)
 #define pio_put_fifo(n, d) pio_sm_put(state_machine[n].pio, state_machine[n].sm, d)
+#define pio_fifo_empty(n) pio_sm_is_rx_fifo_empty(state_machine[n].pio, state_machine[n].sm)
 
 #define POW2_CEIL(x_) ({      \
     unsigned int x = x_; \
@@ -86,6 +91,9 @@ pio_sm_t state_machine[3];
 
 UserROM user_rom;
 Mapper mapper;
+CoCoDisk disk;
+
+#define disk_run() disk.run([] { return pio_fifo_empty(PSM_BUS); })
 
 #ifdef COCO_BOARD
 // Reads served since the cart was switched on. A BASIC signature probe reads
@@ -114,6 +122,7 @@ volatile uint32_t cart_toggle_start_ms = 0;  // when the CART toggle started
 #endif // BOARD_coco_proto_260402
 
 #define SERIAL_BEGIN_DELAY 100
+#define DW_IDLE_MS 20
 
 #ifndef USE_STDIO
 #include <stdarg.h>
@@ -208,6 +217,8 @@ void setup_pio_irq_logic()
   gpio_set_dir(RESET_PIN, GPIO_IN);
 #endif
 
+  disk.init();
+
 #if USE_IRQ
   pio_set_irq0_source_enabled(pio0, pis_interrupt0, true);
   irq_set_exclusive_handler(PIO0_IRQ_0, pio_irq_handler);
@@ -228,11 +239,7 @@ void __time_critical_func(romulan)(void)
   setup_pio_irq_logic();
 
   while (true) {
-#ifdef PSM_SENDBUS
-    bus.combined = pio_get_fifo(PSM_SENDBUS);
-#else
-    bus.combined = pio_get_fifo(PSM_WAITSEL);
-#endif // PSM_SENDBUS
+    bus.combined = pio_get_fifo(PSM_BUS);
 #if !defined(BOARD_picorom_coco) && !defined(BOARD_coco_proto_260402)
     if (bus.combined == last_bus_state)
       continue;
@@ -260,9 +267,18 @@ void __time_critical_func(romulan)(void)
       last_bus_state = bus.combined;
       continue;
     }
+    if (CoCoDisk::isSelected(bus)) {
+      if (Mapper::isWrite(bus))
+        disk.write(bus.addr, bus.data);
+      else {
+        pio_put_fifo(PSM_READ, disk.peek(bus.addr));
+        disk.afterRead(bus.addr);
+      }
+    }
     // A ROM must not drive the bus while the CPU is writing.
     if (Mapper::isWrite(bus) && !(IO_BASE <= bus.addr && bus.addr < IO_TOP)) {
       last_bus_state = bus.combined;
+      disk_run();
       continue;
     }
 #endif
@@ -332,7 +348,7 @@ void __time_critical_func(romulan)(void)
       mapper.remap(bus);
     }
 #endif
-    else if (mapper.isMapped(bus, user_rom)) {
+    else if (mapper.isMapped(bus, user_rom) && CoCoDisk::romSelected()) {
       unsigned rom_offset;
 
 
@@ -346,9 +362,11 @@ void __time_critical_func(romulan)(void)
       bus.data = rom_ptr[rom_offset];
       pio_put_fifo(PSM_READ, bus.data);
 #endif // RD_PIN
+      disk.afterRomRead();
     }
 
     last_bus_state = bus.combined;
+    disk_run();
   }
 
   return;
@@ -376,6 +394,18 @@ void sendReplyPacket(fujiDeviceID_t source, bool ack, void *data, size_t length)
     DEBUG_PRINTF("Sent\n");
 #endif // VERBOSE_DEBUG
     return;
+}
+
+static void link_send(const uint8_t *data, size_t length)
+{
+  while (length) {
+    uint32_t written = tud_cdc_write(data, (uint32_t) length);
+    tud_cdc_write_flush();
+    data += written;
+    length -= written;
+    if (length)
+      tud_task();
+  }
 }
 
 bool process_command(ByteBuffer &buffer)
@@ -465,6 +495,8 @@ int main()
   uint32_t last_cc_seen = 0, last_ring_sent = 0, now, loop_begin;
   bool our_command = false, serial_ready = false;
   ByteBuffer command_buf;
+  uint8_t link_out[disk.link.MAX_SEND];
+  uint32_t last_dw_seen = 0;
 
 
 #ifdef BOARD_coco_proto_260402
@@ -538,6 +570,12 @@ int main()
     }
 #endif // BOARD_coco_proto_260402
 
+    // The link shares the wire with the CoCo's own DriveWire traffic, and
+    // the host handles one request at a time: wait for that traffic to stop.
+    if (disk.link.active()
+        || (ring_tx_in == ring_tx_out && now - last_dw_seen >= DW_IDLE_MS))
+      link_send(link_out, disk.link.poll(now, link_out));
+
     check_tx();
 
     if (command_buf.size()) {
@@ -562,8 +600,12 @@ int main()
         unsigned char rc;
         tud_cdc_read(&rc, 1);
         input = rc;
-        if (!command_buf.size() && input != SLIP_END)
+        if (disk.link.active())
+          link_send(link_out, disk.link.receive(rc, link_out));
+        else if (!command_buf.size() && input != SLIP_END) {
           ring_append(ring_rx, ring_rx_in, input);
+          last_dw_seen = now;
+        }
         else {
           // if SLIP_END or already capturing then push to command_buf
           last_cc_seen = to_ms_since_boot(get_absolute_time());
@@ -608,7 +650,8 @@ int main()
       }
     }
 
-    if (serial_ready && ring_tx_in != ring_tx_out) {
+    if (serial_ready && ring_tx_in != ring_tx_out && !disk.link.active()) {
+      last_dw_seen = now;
 #ifdef USE_STDIO
       putchar(ring_tx[ring_tx_out]);
       ring_tx_out = (ring_tx_out + 1) % sizeof(ring_tx);
