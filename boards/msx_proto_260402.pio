@@ -75,16 +75,12 @@ void waitsel_init_setup(sm_setup_t *setup)
 %}
 
 .program send_bus
+; One capture per /SLTSL assertion.
 idle:
         wait 1 irq next 0               ; IRQ sent when we are selected
 
         mov y, pins             ; read in all pins
         in y, PIN_COUNT         ; autopush address and data bits to RX FIFO
-
-.wrap_target
-        mov x, pins             ; read all pins again
-        jmp x!=y idle           ; if any have changed, restart and check /OE and /SLTSL again
-.wrap
 
 % c-sdk {
 static const pin_range_t send_bus_pins[] = {
@@ -107,6 +103,8 @@ void send_bus_init_setup(sm_setup_t *setup)
   setup->push_threshold	    = 32;
   setup->sideset_base	    = -1;
   setup->jmp_pin	    = -1;
+  // Receive only: take the TX half as extra depth.
+  setup->fifo_join          = PIO_FIFO_JOIN_RX;
 };
 %}
 
@@ -150,5 +148,7 @@ void read_init_setup(sm_setup_t *setup)
   setup->sideset_count      = 1;
   setup->sideset_opt        = true;
   setup->jmp_pin	    = SLTSL_PIN;
+  // Transmit only: take the RX half as extra depth.
+  setup->fifo_join          = PIO_FIFO_JOIN_TX;
 };
 %}
