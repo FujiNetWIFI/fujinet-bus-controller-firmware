@@ -2,6 +2,7 @@
 #include "board_defs.h"
 #include "UserROM.h"
 #include "Mapper.h"
+#include "Subslot.h"
 #include "CoCoDisk.h"
 #include "FujiBusPacket.h"
 #include "fujiDeviceID.h"
@@ -91,6 +92,9 @@ pio_sm_t state_machine[3];
 
 UserROM user_rom;
 Mapper mapper;
+#ifdef RD_PIN
+Subslot subslot;
+#endif // RD_PIN
 CoCoDisk disk;
 
 #define disk_run() disk.run([] { return pio_fifo_empty(PSM_BUS); })
@@ -249,6 +253,21 @@ void __time_critical_func(romulan)(void)
     DEBUG_PRINTF("ADDR:%04x DATA:%02x CTS:%d SCS:%d RW:%d UN:%d COMBINED:0x%08x\r\n",
                  bus.addr, bus.data, 0, bus.scs, bus.rw, bus.unused, bus.combined);
 #endif
+
+#ifdef RD_PIN
+    if (subslot.isRegister(bus)) {
+      if (!bus.rd)
+        pio_put_fifo(PSM_READ, subslot.readRegister());
+      else
+        subslot.writeRegister(bus.data);
+      last_bus_state = bus.combined;
+      continue;
+    }
+    if (!subslot.isSelected(bus)) {
+      last_bus_state = bus.combined;
+      continue;
+    }
+#endif // RD_PIN
 
     if (!user_rom.isActive() && rom_ptr != DEFAULT_ROM)
       rom_ptr = DEFAULT_ROM;
