@@ -60,5 +60,14 @@ $(ROM_H): $(ROM_IMAGE) | $(BUILD_DIR)
 $(ROM_IMAGE): $(ROM_CFILES) $(ROM_AFILES)
 	defoogi make -C $(MSX_DIR)
 
+UNAPI_OUT = $(CURDIR)/build/unapi
+
+# The MSX-UNAPI cartridge (msx/unapi); not embedded in the firmware yet.
+unapi-rom:
+	AS_DEFAULT=z88dk-z80asm defoogi make -C msx/unapi R2R_DIR=$(UNAPI_OUT)/r2r \
+	  BUILD_DIR=$(UNAPI_OUT)/obj CACHE_DIR=$(UNAPI_OUT)/_cache
+
+.PHONY: unapi-rom
+
 $(BUILD_DIR):
 	mkdir -p $@
