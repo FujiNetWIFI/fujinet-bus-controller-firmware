@@ -38,6 +38,16 @@ all: $(BOARD)
 clean:
 	rm -rf build
 
+TEST_DIR = build/tests
+
+.PHONY: tests
+tests:
+	mkdir -p $(TEST_DIR)
+	$(CXX) -std=c++20 -Wall -Wextra -O2 -o $(TEST_DIR)/wd1773_test tests/wd1773_test.cpp WD1773.cpp
+	$(CXX) -std=c++20 -Wall -Wextra -O2 -o $(TEST_DIR)/sectorlink_test tests/sectorlink_test.cpp
+	$(TEST_DIR)/wd1773_test
+	$(TEST_DIR)/sectorlink_test
+
 # Don't leave a truncated target behind when a recipe fails
 .DELETE_ON_ERROR:
 

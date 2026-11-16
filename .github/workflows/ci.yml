@@ -9,6 +9,16 @@ env:
   PICO_SDK_VERSION: "2.2.0"
 
 jobs:
+  tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests
+        run: make tests
+
   build:
     name: Build ${{ matrix.board }}
     runs-on: ubuntu-latest
