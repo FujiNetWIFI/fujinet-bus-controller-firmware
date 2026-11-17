@@ -18,6 +18,11 @@
 .define public RESET_PIN	35	; RESET
 .define public CART_PIN		36	; CoCo cartridge CART line (autostart trigger), active-low
 
+.define public HALT_PIN		38	; /HALT, open-drain
+.define public NMI_PIN		37	; /NMI, open-drain
+.define public DISK_LATCH	0xFF40	; Disk controller control latch
+.define public FDC_BASE		0xFF48	; WD1773 registers
+
 .define public LED_PIN		39	; LED on the Core2350B itself
 
 .define public IO_BASE		0xFF41

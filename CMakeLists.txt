@@ -31,6 +31,10 @@ add_executable(${PROJECT_NAME}
     diag_uart.cpp
 )
 
+if(BOARD STREQUAL "coco_proto_260402")
+    target_sources(${PROJECT_NAME} PRIVATE WD1773.cpp)
+endif()
+
 # Include board-specific configuration
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/boards)
 target_compile_definitions(${PROJECT_NAME} PRIVATE BOARD_${BOARD})

@@ -17,8 +17,9 @@ ROM_H = $(BUILD_DIR)/rom.h
 UF2_BINARY = $(BUILD_DIR)/fujiversal_$(BOARD).uf2
 
 SRC = main.cpp board_defs.h setup_sm.cpp setup_sm.h FujiBusPacket.cpp	\
-      FujiBusPacket.h UserROM.h UserROM.cpp Mapper.h fujiDeviceID.h	\
-      fujiCommandID.h diag_uart.cpp diag_uart.h $(ROM_H)
+      FujiBusPacket.h UserROM.h UserROM.cpp Mapper.h CoCoDisk.h	\
+      WD1773.h WD1773.cpp SectorLink.h fujiDeviceID.h fujiCommandID.h	\
+      diag_uart.cpp diag_uart.h $(ROM_H)
 
 $(BUILD_DIR)/$(FIRMWARE): $(SRC) $(BUILD_MAKE)
 	defoogi make -C $(BUILD_DIR)
@@ -36,6 +37,16 @@ all: $(BOARD)
 
 clean:
 	rm -rf build
+
+TEST_DIR = build/tests
+
+.PHONY: tests
+tests:
+	mkdir -p $(TEST_DIR)
+	$(CXX) -std=c++20 -Wall -Wextra -O2 -o $(TEST_DIR)/wd1773_test tests/wd1773_test.cpp WD1773.cpp
+	$(CXX) -std=c++20 -Wall -Wextra -O2 -o $(TEST_DIR)/sectorlink_test tests/sectorlink_test.cpp
+	$(TEST_DIR)/wd1773_test
+	$(TEST_DIR)/sectorlink_test
 
 # Don't leave a truncated target behind when a recipe fails
 .DELETE_ON_ERROR:
