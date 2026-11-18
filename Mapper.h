@@ -39,7 +39,9 @@
   accessed through more than one range of CPU addresses.
 */
 
+#define MAX_ADDRESS 0x10000u
 #define MAX_WINDOWS 8
+#define MAX_MIRRORS 8
 #define MAX_PAGES 64 // finest window the offset table can hold: 1K
 
 class Mapper
@@ -61,7 +63,7 @@ private:
   uint16_t windowSize = ROM_SEG_SIZE;
   uint16_t windowShift = __builtin_ctz(ROM_SEG_SIZE);
 
-  std::array<MapperMirror, MAX_WINDOWS> mirrors;
+  std::array<MapperMirror, MAX_MIRRORS> mirrors;
   unsigned mirrorCount = 0;
 
   unsigned windowBase = UINT_MAX, windowTop = 0;
@@ -83,7 +85,7 @@ private:
   }
 
   inline void resolve(unsigned base, unsigned top) {
-    for (unsigned addr = base; addr < std::min(top, 0x10000u); addr += windowSize)
+    for (unsigned addr = base; addr < std::min(top, MAX_ADDRESS); addr += windowSize)
       delta[addr >> windowShift] = windowOffset(addr) - addr;
     return;
   }
@@ -307,6 +309,9 @@ public:
   }
 
   void addWindow(MapperWindow window) {
+    if (windowCount >= MAX_WINDOWS)
+      return;
+
     // FIXME - keep windows sorted by window_base
     windows[windowCount] = window;
 
@@ -318,13 +323,19 @@ public:
              windows[windowCount].reg_base, windows[windowCount].reg_top);
     }
 
-    windowCount += 1;
     windowSize = windows[0].window_top - windows[0].window_base;
+    if (windowSize < (MAX_ADDRESS / MAX_PAGES))
+      return;
+
     windowShift = __builtin_ctz(windowSize);
+    windowCount += 1;
     return;
   }
 
   void addMirror(MapperMirror mirror) {
+    if (mirrorCount >= MAX_WINDOWS)
+      return;
+
     // FIXME - keep mirrors sorted by mirror_base
     mirrors[mirrorCount] = mirror;
 
@@ -343,7 +354,7 @@ public:
     for (unsigned idx = 0; idx < windowCount; idx++)
       windows[idx].bank = idx;
     if (windowCount)
-      resolve(0, 0x10000);
+      resolve(0, MAX_ADDRESS);
     else
       std::fill(std::begin(delta), std::end(delta), -(int32_t)BUS_ROM_BASE);
     return;

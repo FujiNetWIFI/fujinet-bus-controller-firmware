@@ -450,20 +450,6 @@ bool process_command(ByteBuffer &buffer)
   case CMD::DBC_SEGMENT_CLOSE:
     {
       size_t size = user_rom.close();
-#ifdef OBSOLETE
-#ifdef COCO_BOARD
-      // The host sends no ROM type, so classify by size. It cannot tell a
-      // banked 32K cart from a flat one; none is known.
-      if (mapper.type() == ROM_TYPE_UNKNOWN && size > 0) {
-        if (size <= SIZE_32K)
-          mapper.setROMType(ROM_TYPE_COCO_32K_FF90);
-        else if (size <= 2 * SIZE_32K)
-          mapper.setROMType(ROM_TYPE_COCO_64K_FF90);
-        else
-          mapper.setROMType(ROM_TYPE_COCO_128K_FF90);
-      }
-#endif
-#endif /* OBSOLETE */
       if (size > 0)
         mapper.setROMSize(size);
       sendReplyPacket(packet->device(), size > 0, nullptr, 0);
@@ -484,7 +470,7 @@ bool process_command(ByteBuffer &buffer)
     break;
 
   case CMD::DBC_MAPPER_ADD_WINDOW:
-    if (!packet->paramCount() < 4)
+    if (packet->paramCount() < 4)
       sendReplyPacket(packet->device(), false, nullptr, 0);
     else {
       mapper.addWindow({
@@ -492,6 +478,19 @@ bool process_command(ByteBuffer &buffer)
           .reg_top = packet->param(1),
           .window_base = packet->param(2),
           .window_top = packet->param(3),
+        });
+      sendReplyPacket(packet->device(), true, nullptr, 0);
+    }
+    break;
+
+  case CMD::DBC_MAPPER_ADD_MIRROR:
+    if (packet->paramCount() < 3)
+      sendReplyPacket(packet->device(), false, nullptr, 0);
+    else {
+      mapper.addMirror({
+          .mirror_base = packet->param(0),
+          .mirror_top = packet->param(1),
+          .source = packet->param(2),
         });
       sendReplyPacket(packet->device(), true, nullptr, 0);
     }
