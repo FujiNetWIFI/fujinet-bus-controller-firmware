@@ -308,12 +308,16 @@ public:
     return;
   }
 
-  void addWindow(MapperWindow window) {
+  error_is_true addWindow(MapperWindow window) {
     if (windowCount >= MAX_WINDOWS)
-      return;
+      RETURN_ERROR_AS_TRUE();
 
     // FIXME - keep windows sorted by window_base
     windows[windowCount] = window;
+
+    uint16_t newWS = windows[0].window_top - windows[0].window_base;
+    if (newWS < (MAX_ADDRESS / MAX_PAGES))
+      RETURN_ERROR_AS_TRUE();
 
     extend(windowBase, windowTop,
            windows[windowCount].window_base, windows[windowCount].window_top);
@@ -323,18 +327,15 @@ public:
              windows[windowCount].reg_base, windows[windowCount].reg_top);
     }
 
-    windowSize = windows[0].window_top - windows[0].window_base;
-    if (windowSize < (MAX_ADDRESS / MAX_PAGES))
-      return;
-
+    windowSize = newWS;
     windowShift = __builtin_ctz(windowSize);
     windowCount += 1;
-    return;
+    RETURN_SUCCESS_AS_FALSE();
   }
 
-  void addMirror(MapperMirror mirror) {
-    if (mirrorCount >= MAX_WINDOWS)
-      return;
+  error_is_true addMirror(MapperMirror mirror) {
+    if (mirrorCount >= MAX_MIRRORS)
+      RETURN_ERROR_AS_TRUE();
 
     // FIXME - keep mirrors sorted by mirror_base
     mirrors[mirrorCount] = mirror;
@@ -343,7 +344,7 @@ public:
            mirrors[mirrorCount].mirror_base, mirrors[mirrorCount].mirror_top);
 
     mirrorCount += 1;
-    return;
+    RETURN_SUCCESS_AS_FALSE();
   }
 
   // Called by the bus loop when the user ROM is switched on. The barrier

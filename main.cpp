@@ -470,30 +470,28 @@ bool process_command(ByteBuffer &buffer)
     break;
 
   case CMD::DBC_MAPPER_ADD_WINDOW:
-    if (packet->paramCount() < 4)
+    if (packet->paramCount() < 4
+        || mapper.addWindow({
+            .reg_base = packet->param(0),
+            .reg_top = packet->param(1),
+            .window_base = packet->param(2),
+            .window_top = packet->param(3),
+          }).is_error())
       sendReplyPacket(packet->device(), false, nullptr, 0);
-    else {
-      mapper.addWindow({
-          .reg_base = packet->param(0),
-          .reg_top = packet->param(1),
-          .window_base = packet->param(2),
-          .window_top = packet->param(3),
-        });
+    else
       sendReplyPacket(packet->device(), true, nullptr, 0);
-    }
     break;
 
   case CMD::DBC_MAPPER_ADD_MIRROR:
-    if (packet->paramCount() < 3)
+    if (packet->paramCount() < 3
+        || mapper.addMirror({
+            .mirror_base = packet->param(0),
+            .mirror_top = packet->param(1),
+            .source = packet->param(2),
+          }).is_error())
       sendReplyPacket(packet->device(), false, nullptr, 0);
-    else {
-      mapper.addMirror({
-          .mirror_base = packet->param(0),
-          .mirror_top = packet->param(1),
-          .source = packet->param(2),
-        });
+    else
       sendReplyPacket(packet->device(), true, nullptr, 0);
-    }
     break;
 
   case CMD::FUJI_RESET:
