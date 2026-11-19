@@ -30,6 +30,9 @@ typedef struct {
   bool sideset_opt;
 
   int jmp_pin;         // -1 = skip
+
+  // Zero (PIO_FIFO_JOIN_NONE) keeps the FIFOs split.
+  enum pio_fifo_join fifo_join;
 } sm_setup_t;
 
 typedef struct {
