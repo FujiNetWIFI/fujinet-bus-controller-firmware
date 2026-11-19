@@ -374,26 +374,26 @@ void __time_critical_func(romulan)(void)
 
 void sendReplyPacket(fujiDeviceID_t source, bool ack, void *data, size_t length)
 {
-    FujiBusPacket packet(source, ack ? FUJICMD_ACK : FUJICMD_NAK,
-                         ack ? std::string(static_cast<const char*>(data), length) : "");
-    ByteBuffer encoded = packet.serialize();
+  FujiBusPacket packet(source, ack ? CMD::FUJI_ACK : CMD::FUJI_NAK,
+                       ack ? std::string(static_cast<const char*>(data), length) : "");
+  ByteBuffer encoded = packet.serialize();
 #if VERBOSE_DEBUG
-    DEBUG_PRINTF("Sending reply: dev:%02x cmd:%02x len:%04x\n",
-           packet.device(), packet.command(), encoded.size());
+  DEBUG_PRINTF("Sending reply: dev:%02x cmd:%02x len:%04x\n",
+               packet.device(), packet.command(), encoded.size());
 #endif // VERBOSE_DEBUG
 #ifdef USE_STDIO
-    fwrite(encoded.data(), 1, encoded.size(), stdout);
-    fflush(stdout);
+  fwrite(encoded.data(), 1, encoded.size(), stdout);
+  fflush(stdout);
 #else
-    tud_cdc_write(encoded.data(), (uint32_t) encoded.size());
-    tud_cdc_write_flush();
-    while (tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
-      tud_task();
+  tud_cdc_write(encoded.data(), (uint32_t) encoded.size());
+  tud_cdc_write_flush();
+  while (tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
+    tud_task();
 #endif // USE_STDIO
 #if VERBOSE_DEBUG
-    DEBUG_PRINTF("Sent\n");
+  DEBUG_PRINTF("Sent\n");
 #endif // VERBOSE_DEBUG
-    return;
+  return;
 }
 
 static void link_send(const uint8_t *data, size_t length)
@@ -421,7 +421,7 @@ bool process_command(ByteBuffer &buffer)
   }
 
   switch (packet->command()) {
-  case FUJICMD_OPEN:
+  case CMD::DBC_SEGMENT_OPEN:
     if (packet->paramCount() < 1)
       sendReplyPacket(packet->device(), false, nullptr, 0);
     else {
@@ -439,7 +439,7 @@ bool process_command(ByteBuffer &buffer)
     }
     break;
 
-  case FUJICMD_WRITE:
+  case CMD::DBC_SEGMENT_WRITE:
     if (!packet->data().has_value())
       sendReplyPacket(packet->device(), false, nullptr, 0);
     else
@@ -447,21 +447,9 @@ bool process_command(ByteBuffer &buffer)
                       nullptr, 0);
     break;
 
-  case FUJICMD_CLOSE:
+  case CMD::DBC_SEGMENT_CLOSE:
     {
       size_t size = user_rom.close();
-#ifdef COCO_BOARD
-      // The host sends no ROM type, so classify by size. It cannot tell a
-      // banked 32K cart from a flat one; none is known.
-      if (mapper.type() == ROM_TYPE_UNKNOWN && size > 0) {
-        if (size <= SIZE_32K)
-          mapper.setROMType(ROM_TYPE_COCO_32K_FF90);
-        else if (size <= 2 * SIZE_32K)
-          mapper.setROMType(ROM_TYPE_COCO_64K_FF90);
-        else
-          mapper.setROMType(ROM_TYPE_COCO_128K_FF90);
-      }
-#endif
       if (size > 0)
         mapper.setROMSize(size);
       sendReplyPacket(packet->device(), size > 0, nullptr, 0);
@@ -471,7 +459,42 @@ bool process_command(ByteBuffer &buffer)
     }
     break;
 
-  case FUJICMD_RESET:
+  case CMD::DBC_MAPPER_SET_INFO:
+    if (!packet->data().has_value())
+      mapper.resetWindows();
+    else {
+      fujiROMType_t rtype = static_cast<fujiROMType_t>(packet->data().value()[0]);
+      mapper.setROMType(rtype);
+    }
+    sendReplyPacket(packet->device(), true, nullptr, 0);
+    break;
+
+  case CMD::DBC_MAPPER_ADD_WINDOW:
+    if (packet->paramCount() < 4
+        || mapper.addWindow({
+            .reg_base = packet->param(0),
+            .reg_top = packet->param(1),
+            .window_base = packet->param(2),
+            .window_top = packet->param(3),
+          }).is_error())
+      sendReplyPacket(packet->device(), false, nullptr, 0);
+    else
+      sendReplyPacket(packet->device(), true, nullptr, 0);
+    break;
+
+  case CMD::DBC_MAPPER_ADD_MIRROR:
+    if (packet->paramCount() < 3
+        || mapper.addMirror({
+            .mirror_base = packet->param(0),
+            .mirror_top = packet->param(1),
+            .source = packet->param(2),
+          }).is_error())
+      sendReplyPacket(packet->device(), false, nullptr, 0);
+    else
+      sendReplyPacket(packet->device(), true, nullptr, 0);
+    break;
+
+  case CMD::FUJI_RESET:
     user_rom.reset();
     sendReplyPacket(packet->device(), true, nullptr, 0);
     break;
