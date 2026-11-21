@@ -8,11 +8,7 @@ void UserROM::open(unsigned seg, fujiROMType_t type)
 void UserROM::open(unsigned seg)
 #endif /* OBSOLETE */
 {
-  size_t offset;
-
   _openSegment = seg % ROM_MAX_SEGS;
-  offset = _openSegment * ROM_SEG_SIZE;
-  offset %= sizeof(_romData);
   _writePos = _openSegment * ROM_SEG_SIZE;
 #ifdef OBSOLETE
   _type = type;
@@ -64,7 +60,9 @@ size_t UserROM::close(void)
 #endif /* OBSOLETE */
 
   offset = _openSegment * ROM_SEG_SIZE;
-  size = _segmentSize[_openSegment] = _writePos - offset;
+  // A wrap overwrote the start of the buffer; only what fits from the segment start is ROM
+  size = std::min<size_t>(_writePos - offset, sizeof(_romData) - offset);
+  _segmentSize[_openSegment] = size;
 #ifdef OBSOLETE
   bankCount = std::max<uint16_t>(1, (_segmentSize[_openSegment] + bankSize - 1) / bankSize);
 #endif /* OBSOLETE */
