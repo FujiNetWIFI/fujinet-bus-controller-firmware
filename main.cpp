@@ -311,6 +311,7 @@ void __time_critical_func(romulan)(void)
           // Enable/disable user ROM
           if (bus.data & IO_FLAG_USERROM_ENABLE) {
             user_rom.activate();
+            mapper.setWrap(user_rom.wrapOffset());
             mapper.activate();
             rom_ptr = user_rom.activeBase;
 #ifdef COCO_BOARD
@@ -338,6 +339,7 @@ void __time_critical_func(romulan)(void)
         }
         else if (bus.data & IO_FLAG_ROM_BANK_CMD) {
           user_rom.selectSegment(bus.data);
+          mapper.setWrap(user_rom.wrapOffset());
           rom_ptr = user_rom.activeBase;
         }
         break;

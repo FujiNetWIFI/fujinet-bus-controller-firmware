@@ -72,6 +72,9 @@ private:
 
   uint16_t bankCount = 1;
 
+  // Offset from the selected segment past which the ROM continues at the start of the buffer.
+  unsigned romWrap = UINT_MAX;
+
   fujiROMType_t _type = ROM_TYPE_UNKNOWN;
 
   // windowOffset() per window-sized page: the CoCo can't afford it per read.
@@ -85,8 +88,12 @@ private:
   }
 
   inline void resolve(unsigned base, unsigned top) {
-    for (unsigned addr = base; addr < std::min(top, MAX_ADDRESS); addr += windowSize)
-      delta[addr >> windowShift] = windowOffset(addr) - addr;
+    for (unsigned addr = base; addr < std::min(top, MAX_ADDRESS); addr += windowSize) {
+      unsigned rom_offset = windowOffset(addr);
+      if (rom_offset >= romWrap)
+        rom_offset -= ROM_MAX_SEGS * ROM_SEG_SIZE;
+      delta[addr >> windowShift] = rom_offset - addr;
+    }
     return;
   }
 
@@ -285,6 +292,14 @@ public:
     return;
   }
 
+  // The segment the ROM was written to can wrap past the end of the buffer.
+  void setWrap(unsigned wrap) {
+    romWrap = wrap;
+    if (windowCount)
+      resolve(0, MAX_ADDRESS);
+    return;
+  }
+
   void resetWindows(void) {
     windows.fill({});
     windowCount = 0;
@@ -407,6 +422,8 @@ public:
       // Only this window's pages and their mirrors: the next fetch can come
       // from the new bank.
       int32_t d = (window->bank - (int)(window - windows.data())) * windowSize - windowBase;
+      if (window->bank * windowSize >= romWrap)
+        d -= ROM_MAX_SEGS * ROM_SEG_SIZE;
       for (unsigned addr = window->window_base; addr < window->window_top; addr += windowSize)
         delta[addr >> windowShift] = d;
       for (unsigned idx = 0; idx < mirrorCount; idx++) {
