@@ -1,6 +1,9 @@
 BOARD ?= picorom_msx
 
-ifneq ($(filter $(BOARD),picorom_coco coco_proto_260402),)
+ifeq ($(BOARD),coco_proto_260402)
+  # FujiDOS 1.0 release, RichStephens/fujidos-coco
+  ROM_IMAGE = fujidos.rom
+else ifeq ($(BOARD),picorom_coco)
   ROM_IMAGE = hdbdw3bc3.rom
 else
   ROM_IMAGE = config-msx.rom
