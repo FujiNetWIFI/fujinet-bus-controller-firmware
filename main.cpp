@@ -256,10 +256,10 @@ void __time_critical_func(romulan)(void)
 
 #ifdef RD_PIN
     if (subslot.isRegister(bus)) {
-      if (!bus.rd)
-        pio_put_fifo(PSM_READ, subslot.readRegister());
-      else
+      if (Mapper::isWrite(bus))
         subslot.writeRegister(bus.data);
+      else
+        pio_put_fifo(PSM_READ, subslot.readRegister());
       last_bus_state = bus.combined;
       continue;
     }
