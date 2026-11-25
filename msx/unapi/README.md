@@ -22,8 +22,10 @@ adapter's IO window, so programs anywhere in the machine can reach the FujiNet.
 
 ## How it fits
 
-Meant to sit in its own subslot of the FujiNet cartridge, beside the IO
-window; the firmware does not serve it yet. Programs reach the FujiNet through
+The msx_proto_260402 firmware serves it from subslot 1 of the cartridge, with
+the IO window in page 2 of the same subslot; CONFIG or the user ROM sits in
+subslot 0. With mode $1C the slot is left unexpanded and holds only this ROM
+and the window. Programs reach the FujiNet through
 it by EXTBIO; a client that initialises first finds it by the 4010h tag and
 calls it at 4018h. Routine numbers match fujinet-lib.
 
