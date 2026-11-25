@@ -1,9 +1,13 @@
 #ifndef SUBSLOT_H
 #define SUBSLOT_H
 
-// Include after board_defs.h, which supplies BusSignals.
+// Include after board_defs.h, which supplies BusSignals and BUS_ROM_BASE.
 
 #include <cstdint>
+
+#ifdef RD_PIN
+#define UNAPI_ROM_PATH STR(build/BOARD_NAME/unapi_rom.h)
+#include UNAPI_ROM_PATH
 
 // The cartridge's slot layout, chosen by the mode byte of a ROM mode command.
 // Expanded (power-on default): the subslot register is at FFFFh, subslot 0 holds
@@ -51,8 +55,18 @@ public:
     return _unapiEnabled ? HOLDER_UNAPI : HOLDER_MAIN;
   }
 
-  // Whether CONFIG / the user ROM shares its subslot with the IO window.
-  inline bool mainHasIOWindow(void) const { return !_expanded; }
+  // Whether the IO window answers in the page holding the cycle. UNAPI's
+  // window stays live under a running user ROM; the legacy one doesn't.
+  inline bool ioWindowOpen(Holder holder, bool userRomActive) const {
+    return holder == HOLDER_UNAPI || (!_expanded && !userRomActive);
+  }
+
+  // The UNAPI ROM byte at addr, or -1 outside the ROM.
+  static inline int unapiByte(uint16_t addr) {
+    if (BUS_ROM_BASE <= addr && addr < BUS_ROM_BASE + sizeof(unapi_rom))
+      return unapi_rom[addr - BUS_ROM_BASE];
+    return -1;
+  }
 
   // Applies the UNAPI and EXPAND bits of a ROM mode command.
   inline void setMode(uint8_t mode) {
@@ -76,5 +90,26 @@ public:
     return;
   }
 };
+
+#else // ! RD_PIN
+
+// Without /RD there is no FFFFh decode: one unexpanded slot, no UNAPI.
+class Subslot
+{
+public:
+  enum Holder : uint8_t { HOLDER_NONE, HOLDER_MAIN, HOLDER_UNAPI };
+
+  template <typename T> inline bool isRegister(T) const { return false; }
+  inline uint8_t readRegister(void) const { return 0xFF; }
+  inline void writeRegister(uint8_t) {}
+  template <typename T> inline Holder holder(T) const { return HOLDER_MAIN; }
+  inline bool ioWindowOpen(Holder, bool userRomActive) const { return !userRomActive; }
+  static inline int unapiByte(uint16_t) { return -1; }
+  inline void setMode(uint8_t) {}
+  inline void requestPowerOn(void) {}
+  inline void applyPowerOn(void) {}
+};
+
+#endif // RD_PIN
 
 #endif // SUBSLOT_H

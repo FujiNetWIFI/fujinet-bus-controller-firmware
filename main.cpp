@@ -7,10 +7,6 @@
 #include "FujiBusPacket.h"
 #include "fujiDeviceID.h"
 #include "fujiCommandID.h"
-#ifdef RD_PIN
-#define UNAPI_ROM_PATH STR(build/BOARD_NAME/unapi_rom.h)
-#include UNAPI_ROM_PATH
-#endif // RD_PIN
 #include <cstddef>
 #include <cstdint>
 
@@ -96,9 +92,7 @@ pio_sm_t state_machine[3];
 
 UserROM user_rom;
 Mapper mapper;
-#ifdef RD_PIN
 Subslot subslot;
-#endif // RD_PIN
 CoCoDisk disk;
 
 #define disk_run() disk.run([] { return pio_fifo_empty(PSM_BUS); })
@@ -247,9 +241,7 @@ void __time_critical_func(romulan)(void)
   setup_pio_irq_logic();
 
   while (true) {
-#ifdef RD_PIN
     subslot.applyPowerOn();
-#endif // RD_PIN
     bus.combined = pio_get_fifo(PSM_BUS);
 #if !defined(BOARD_picorom_coco) && !defined(BOARD_coco_proto_260402) && !defined(BOARD_msx_proto_260402)
     if (bus.combined == last_bus_state)
@@ -261,12 +253,11 @@ void __time_critical_func(romulan)(void)
                  bus.addr, bus.data, 0, bus.scs, bus.rw, bus.unused, bus.combined);
 #endif
 
-#ifdef RD_PIN
     if (subslot.isRegister(bus)) {
-      if (!bus.rd)
-        pio_put_fifo(PSM_READ, subslot.readRegister());
-      else
+      if (Mapper::isWrite(bus))
         subslot.writeRegister(bus.data);
+      else
+        pio_put_fifo(PSM_READ, subslot.readRegister());
       last_bus_state = bus.combined;
       continue;
     }
@@ -276,12 +267,12 @@ void __time_critical_func(romulan)(void)
       continue;
     }
     if (holder == Subslot::HOLDER_UNAPI && !(IO_BASE <= bus.addr && bus.addr < IO_TOP)) {
-      if (!bus.rd && BUS_ROM_BASE <= bus.addr && bus.addr < BUS_ROM_BASE + sizeof(unapi_rom))
-        pio_put_fifo(PSM_READ, unapi_rom[bus.addr - BUS_ROM_BASE]);
+      int data;
+      if (!Mapper::isWrite(bus) && (data = Subslot::unapiByte(bus.addr)) >= 0)
+        pio_put_fifo(PSM_READ, data);
       last_bus_state = bus.combined;
       continue;
     }
-#endif // RD_PIN
 
     if (!user_rom.isActive() && rom_ptr != DEFAULT_ROM)
       rom_ptr = DEFAULT_ROM;
@@ -317,14 +308,8 @@ void __time_critical_func(romulan)(void)
 #endif
 
     // FIXME - only check IO_BASE if rom_ptr == ROM
-#ifdef RD_PIN
-    // UNAPI's window stays live under a running user ROM; the legacy one doesn't.
-    bool io_window = holder == Subslot::HOLDER_UNAPI
-      || (subslot.mainHasIOWindow() && !user_rom.isActive()
-          && IO_BASE <= bus.addr && bus.addr < IO_TOP);
-#else
-    bool io_window = !user_rom.isActive() && IO_BASE <= bus.addr && bus.addr < IO_TOP;
-#endif // RD_PIN
+    bool io_window = IO_BASE <= bus.addr && bus.addr < IO_TOP
+      && subslot.ioWindowOpen(holder, user_rom.isActive());
     if (io_window) {
       unsigned io_reg = (bus.addr - IO_BASE) & 0x3;
 #ifdef RW_PIN
@@ -349,9 +334,7 @@ void __time_critical_func(romulan)(void)
       case IO_CONTROL: // Write control reg
         // Command to enable/disable user ROM, or enable/disable ROM autostart
         if (bus.data & IO_FLAG_ROM_MODE_CMD) {
-#ifdef RD_PIN
           subslot.setMode(bus.data);
-#endif // RD_PIN
           // Enable/disable user ROM
           if (bus.data & IO_FLAG_USERROM_ENABLE) {
             user_rom.activate();
@@ -540,9 +523,7 @@ bool process_command(ByteBuffer &buffer)
 
   case CMD::FUJI_RESET:
     user_rom.reset();
-#ifdef RD_PIN
     subslot.requestPowerOn();
-#endif // RD_PIN
     sendReplyPacket(packet->device(), true, nullptr, 0);
     break;
 
