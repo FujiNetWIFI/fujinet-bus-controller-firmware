@@ -102,7 +102,47 @@ Subslot subslot;
 #endif // RD_PIN
 CoCoDisk disk;
 
-#define disk_run() disk.run([] { return pio_fifo_empty(PSM_BUS); })
+#ifdef HALT_PIN
+// Otherwise the compiler recomputes the value on every pass of a loop.
+#define KEEP_IN_REGISTER(v) __asm__ volatile("" : "+r" (v))
+
+// Out of line: inlined, run() costs the bus loops their registers.
+static void __noinline __time_critical_func(disk_service)(void)
+{
+  io_ro_32 *fstat = &state_machine[PSM_BUS].pio->fstat;
+  uint32_t empty = 1u << (PIO_FSTAT_RXEMPTY_LSB + state_machine[PSM_BUS].sm);
+
+
+  KEEP_IN_REGISTER(fstat);
+  KEEP_IN_REGISTER(empty);
+  disk.run([=] { return *fstat & empty; });
+  return;
+}
+
+#define disk_run() do { if (disk.busy()) disk_service(); } while (0)
+
+#define BUS_READ (1u << RW_PIN)
+
+// The serial port's reads. Through event() the reply is late; inlined, they
+// cost the bus loop its registers.
+static bool __noinline __time_critical_func(serial_read)(uint32_t event, io_wo_32 *txf)
+{
+  event &= BUS_READ | 0xFFFF;
+  if (event == (BUS_READ | (IO_BASE + IO_GETC)))
+    *txf = sio_hw->fifo_rd;
+  else if (event == (BUS_READ | (IO_BASE + IO_STATUS)))
+    *txf = (sio_hw->fifo_st & SIO_FIFO_ST_VLD_BITS ? IO_FLAG_AVAIL : 0x00)
+      | (user_rom.isClosed() ? IO_FLAG_USERROM_READY : 0x00);
+  else
+    return false;
+  return true;
+}
+
+#define EVENT_INLINING __attribute__((noinline, section(".time_critical.event")))
+#else
+#define disk_run() do {} while (0)
+#define EVENT_INLINING __attribute__((always_inline))
+#endif
 
 #ifdef COCO_BOARD
 // Reads served since the cart was switched on. A BASIC signature probe reads
@@ -247,11 +287,12 @@ void __time_critical_func(romulan)(void)
 
   setup_pio_irq_logic();
 
-  while (true) {
-    bus.combined = pio_get_fifo(PSM_BUS);
+  // One bus event. Out of line where the loop below answers the urgent
+  // reads itself, so that the loop keeps its registers.
+  auto event = [&](BusSignals bus) EVENT_INLINING -> void {
 #if !defined(BOARD_picorom_coco) && !defined(BOARD_coco_proto_260402)
     if (bus.combined == last_bus_state)
-      continue;
+      return;
 #endif
 
 #if 0
@@ -289,21 +330,16 @@ void __time_critical_func(romulan)(void)
       else if (mapper.isRemap(bus))
         cart_remap(bus);
       last_bus_state = bus.combined;
-      continue;
+      return;
     }
-    if (CoCoDisk::isSelected(bus)) {
-      if (Mapper::isWrite(bus))
-        disk.write(bus.addr, bus.data);
-      else {
-        pio_put_fifo(PSM_READ, disk.peek(bus.addr));
-        disk.afterRead(bus.addr);
-      }
-    }
+    // The bus loop answers the controller's reads.
+    if (CoCoDisk::isSelected(bus) && Mapper::isWrite(bus))
+      disk.write(bus.addr, bus.data);
     // A ROM must not drive the bus while the CPU is writing.
     if (Mapper::isWrite(bus) && !(IO_BASE <= bus.addr && bus.addr < IO_TOP)) {
       last_bus_state = bus.combined;
       disk_run();
-      continue;
+      return;
     }
 #endif
 
@@ -391,7 +427,63 @@ void __time_critical_func(romulan)(void)
 
     last_bus_state = bus.combined;
     disk_run();
+  };
+
+#ifdef HALT_PIN
+  // Register and disk ROM reads are answered here: at 1.78MHz a register
+  // reply has nothing to spare, and code running from the ROM reads on
+  // every cycle. Leaving the loop would make the next reply late.
+  PIO pio = state_machine[PSM_BUS].pio;
+  io_ro_32 *rxf = &pio->rxf[state_machine[PSM_BUS].sm];
+  const uint32_t empty =
+    1u << (PIO_FSTAT_RXEMPTY_LSB + state_machine[PSM_BUS].sm);
+  io_wo_32 *txf =
+    &state_machine[PSM_READ].pio->txf[state_machine[PSM_READ].sm];
+  // Indexed by the bus address itself.
+  const uint8_t *rom = (const uint8_t *) ((uintptr_t) DEFAULT_ROM - BUS_ROM_BASE);
+
+  KEEP_IN_REGISTER(rxf);
+  KEEP_IN_REGISTER(txf);
+  KEEP_IN_REGISTER(rom);
+
+  while (true) {
+    while (pio->fstat & empty)
+      ;
+    bus.combined = *rxf;
+    if (user_rom.isActive()) {
+      // The cart's own reads can't afford the call either.
+      if (IS_ROM_READ(bus)) {
+        *txf = rom_ptr[mapper.calculateOffset(bus, user_rom)];
+        served_reads = served_reads + 1;
+        continue;
+      }
+    }
+    else {
+      if (CoCoDisk::isRegisterRead(bus)) {
+        *txf = disk.peek(bus.addr);
+        disk.afterRead(bus.addr);
+        disk_run();
+        continue;
+      }
+      if (!Mapper::isWrite(bus)
+          && (uint16_t) (bus.addr - BUS_ROM_BASE) < BUS_ROM_TOP - BUS_ROM_BASE
+          && CoCoDisk::romSelected()) {
+        *txf = rom[bus.addr];
+        disk.afterRomRead();
+        disk_run();
+        continue;
+      }
+      if (serial_read(bus.combined, txf))
+        continue;
+    }
+    event(bus);
   }
+#else
+  while (true) {
+    bus.combined = pio_get_fifo(PSM_BUS);
+    event(bus);
+  }
+#endif
 
   return;
 }
