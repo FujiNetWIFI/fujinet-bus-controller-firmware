@@ -20,18 +20,24 @@ ROM_H = $(BUILD_DIR)/rom.h
 UNAPI_OUT = $(CURDIR)/build/unapi
 UNAPI_SRC = $(wildcard msx/unapi/src/*.[chs] msx/unapi/src/*.inc msx/unapi/src/header/*.asm) \
             msx/unapi/Makefile msx/unapi/pragma.inc
+NEXTOR_OUT = $(CURDIR)/build/nextor3
+NEXTOR_SRC = $(wildcard msx/nextor3/src/*) msx/nextor3/Makefile
 
-# Boards with /RD decode FFFFh, so they also serve the UNAPI ROM in subslot 1.
+# Boards with /RD decode FFFFh, so they also serve the UNAPI ROM in subslot 1
+# and Nextor in subslot 2.
 ifneq ($(shell grep -c RD_PIN boards/$(BOARD).pio),0)
   UNAPI_ROM ?= $(UNAPI_OUT)/r2r/msxrom/unapi.rom
   UNAPI_H = $(BUILD_DIR)/unapi_rom.h
+  NEXTOR_ROM ?= $(NEXTOR_OUT)/nextor3.rom
+  NEXTOR_H = $(BUILD_DIR)/nextor_rom.h
 endif
 UF2_BINARY = $(BUILD_DIR)/fujiversal_$(BOARD).uf2
 
 SRC = main.cpp board_defs.h setup_sm.cpp setup_sm.h FujiBusPacket.cpp	\
-      FujiBusPacket.h UserROM.h UserROM.cpp RingBuffer.h Mapper.h Subslot.h CoCoDisk.h	\
-      WD1773.h WD1773.cpp SectorLink.h fujiDeviceID.h fujiCommandID.h	\
-      diag_uart.cpp diag_uart.h $(ROM_H) $(UNAPI_H)
+      FujiBusPacket.h UserROM.h UserROM.cpp RingBuffer.h Mapper.h Subslot.h	\
+      Nextor.h CoCoDisk.h WD1773.h WD1773.cpp SectorLink.h fujiDeviceID.h	\
+      fujiCommandID.h diag_uart.cpp diag_uart.h $(ROM_H) $(UNAPI_H)	\
+      $(NEXTOR_H)
 
 $(BUILD_DIR)/$(FIRMWARE): $(SRC) $(BUILD_MAKE)
 	defoogi make -C $(BUILD_DIR)
@@ -82,7 +88,17 @@ unapi-rom:
 	AS_DEFAULT=z88dk-z80asm defoogi make -C msx/unapi R2R_DIR=$(UNAPI_OUT)/r2r \
 	  BUILD_DIR=$(UNAPI_OUT)/obj CACHE_DIR=$(UNAPI_OUT)/_cache
 
-.PHONY: unapi-rom
+$(NEXTOR_H): $(NEXTOR_ROM) | $(BUILD_DIR)
+	defoogi xxd -i -n nextor_rom $< > $@
+
+$(NEXTOR_ROM): $(NEXTOR_SRC)
+	$(MAKE) nextor-rom
+
+# The Nextor 3 kernel with the FujiNet driver (msx/nextor3).
+nextor-rom:
+	defoogi make -C msx/nextor3 BUILD_DIR=$(NEXTOR_OUT)
+
+.PHONY: unapi-rom nextor-rom
 
 $(BUILD_DIR):
 	mkdir -p $@

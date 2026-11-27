@@ -4,6 +4,7 @@
 #include "RingBuffer.h"
 #include "Mapper.h"
 #include "Subslot.h"
+#include "Nextor.h"
 #include "CoCoDisk.h"
 #include "FujiBusPacket.h"
 #include "fujiDeviceID.h"
@@ -98,6 +99,7 @@ RingBuffer<RING_SIZE> ring_tx;
 UserROM user_rom;
 Mapper mapper;
 Subslot subslot;
+Nextor nextor;
 CoCoDisk disk;
 
 #define disk_run() disk.run([] { return pio_fifo_empty(PSM_BUS); })
@@ -278,6 +280,13 @@ void __time_critical_func(romulan)(void)
       last_bus_state = bus.combined;
       continue;
     }
+    if (holder == Subslot::HOLDER_NEXTOR) {
+      int data = nextor.access(bus);
+      if (data >= 0)
+        pio_put_fifo(PSM_READ, data);
+      last_bus_state = bus.combined;
+      continue;
+    }
 
     if (!user_rom.isActive() && rom_ptr != DEFAULT_ROM)
       rom_ptr = DEFAULT_ROM;
@@ -340,6 +349,8 @@ void __time_critical_func(romulan)(void)
         // Command to enable/disable user ROM, or enable/disable ROM autostart
         if (bus.data & IO_FLAG_ROM_MODE_CMD) {
           subslot.setMode(bus.data);
+          if (subslot.nextorEnabled())
+            nextor.activate();
           // Enable/disable user ROM
           if (bus.data & IO_FLAG_USERROM_ENABLE) {
             user_rom.activate();

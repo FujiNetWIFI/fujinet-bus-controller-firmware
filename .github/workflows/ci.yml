@@ -67,14 +67,16 @@ jobs:
           chmod +x "$RUNNER_TEMP/bin/defoogi"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      # config-msx.rom comes from fujinet-config and the UNAPI ROM needs z88dk,
-      # so MSX boards are compiled against blank placeholder images.
+      # config-msx.rom comes from fujinet-config and the UNAPI and Nextor ROMs
+      # need z88dk, so MSX boards are compiled against blank placeholder images.
       - name: Create placeholder MSX ROMs
         if: ${{ !contains(matrix.board, 'coco') }}
         run: |
           head -c 32768 /dev/zero | tr '\0' '\377' > config-msx.rom
           head -c 16384 /dev/zero | tr '\0' '\377' > "$RUNNER_TEMP/unapi.rom"
           echo "UNAPI_ROM=$RUNNER_TEMP/unapi.rom" >> "$GITHUB_ENV"
+          head -c 131072 /dev/zero | tr '\0' '\377' > "$RUNNER_TEMP/nextor3.rom"
+          echo "NEXTOR_ROM=$RUNNER_TEMP/nextor3.rom" >> "$GITHUB_ENV"
 
       # The CoCo ROMs are committed binaries, not built from msxio, but the
       # Makefile's ROM rule lists the msxio sources for every board. Checkout

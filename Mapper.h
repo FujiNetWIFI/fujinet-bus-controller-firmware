@@ -385,6 +385,17 @@ public:
     return BUS_ROM_BASE <= bus.addr && bus.addr < BUS_ROM_TOP;
   }
 
+  // For an image that isn't user_rom's.
+  inline bool inMapped(BusSignals bus) {
+    if (windowCount)
+      return mappedBase <= bus.addr && bus.addr < mappedTop;
+    return BUS_ROM_BASE <= bus.addr && bus.addr < BUS_ROM_TOP;
+  }
+
+  inline unsigned offset(BusSignals bus) {
+    return bus.addr + delta[bus.addr >> windowShift];
+  }
+
   inline MapperWindow *selectedRegister(BusSignals bus) {
     for (unsigned idx = 0; idx < windowCount; idx++) {
       if (windows[idx].reg_base <= bus.addr && bus.addr < windows[idx].reg_top)
