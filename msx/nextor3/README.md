@@ -39,11 +39,13 @@ allocates.
 
 - Availability comes from the device slot table: a slot with nothing in it,
   or holding a ROM, is offline.
-- A slot holding a ROM is flagged as not for automapping, so it gets no
-  drive at boot and the disks around it keep consecutive letters.
+- A slot that is empty or holds a ROM is flagged as not for automapping,
+  so it gets no drive at boot, the disks around it keep consecutive
+  letters, and the kernel's partition search doesn't read it.
 - A media change is a change in a slot's table entry. Remounting the same
   image is not seen as one.
+- One fetch of the table answers for all six devices for about 2 seconds
+  (120 frames), so a change of image can take that long to be seen. A
+  failed read or write fetches it again on the next query.
 - Images report no size; FujiNet doesn't give one.
-- Devices are flagged as unsuitable for Nextor's persistent storage, which
-  would otherwise write `_NEXTOR.PSF` onto whatever image is mounted.
 - A failed read is `.NRDY`, a failed write `.WPROT`: a NAK doesn't say which.

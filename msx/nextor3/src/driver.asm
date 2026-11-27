@@ -25,6 +25,12 @@ SLOTS_REPLY:		equ	SLOT_ENTRY_LEN*8	; the FujiNet sends all eight
 
 SECTOR_SIZE:		equ	512
 
+;--- The slot table is fetched at most this often: the kernel asks after a
+;    device before most accesses, and the table is the same for all of them.
+
+CACHE_JIFFIES:		equ	120	; about 2 seconds
+CACHE_ROM:		equ	2	; cache entry for a ROM; hashes are odd
+
 ;--- The UNAPI ROM
 
 UNAPI_ID_ADDR:		equ	4010h
@@ -48,7 +54,10 @@ W_COUNT:	equ	14
 W_DONE:		equ	15
 W_WRITE:	equ	16
 W_HASH:		equ	17	; DEV_COUNT: slot entries last reported
-W_BUFFER:	equ	W_HASH+DEV_COUNT
+W_CACHE:	equ	W_HASH+DEV_COUNT	; DEV_COUNT: entries, as SE_PARSE gives them
+W_CACHE_TIME:	equ	W_CACHE+DEV_COUNT	; word: JIFFY when the cache was filled
+W_CACHED:	equ	W_CACHE_TIME+2	; nonzero while the cache holds a table
+W_BUFFER:	equ	W_CACHED+1
 WRK_SIZE:	equ	W_BUFFER+SECTOR_SIZE
 
 VER_MAIN:	equ	1
@@ -304,26 +313,24 @@ DV_MANUF:
 	jp	OUT_STR
 
 ;--- 2: device parameters. The image size isn't something FujiNet reports.
-;    Not for the persistent storage: Nextor would write its file onto
-;    whatever image is mounted.
 
 DV_PARAMS:
 	ld	a,h
 	or	l
 	ret	z		; A = RESULT_OK: just checking the device
 
-	;--- A slot holding a ROM gets no drive at boot, so the disks after it
-	;    keep consecutive letters.
+	;--- A slot that is empty or holds a ROM is kept out of the partition
+	;    search, so it gets no drive at boot, the disks after it keep
+	;    consecutive letters, and searches don't read it. The flags follow the
+	;    slot, so a disk mounted there later is picked up.
 
 	push	hl
 	call	GET_WORK
 	call	SLOT_ENTRY
 	pop	hl
-	ld	e,11h		; removable, not for the persistent storage
+	ld	e,01h		; removable
 	jr	nc,DV_PARAMS_FILL
-	or	a
-	jr	z,DV_PARAMS_FILL
-	ld	e,19h		; and not for automapping
+	ld	e,09h		; and not for automapping
 DV_PARAMS_FILL:
 	ld	(hl),0		; block device
 	inc	hl
@@ -390,13 +397,30 @@ DV_STATUS_OUT:
 
 ;--- A slot's entry in the FujiNet's device slot table
 ;    In:  C = device number, IY = work area
-;    Out: Cy = 1 if the slot is empty, holds a ROM, or the FujiNet did not
-;         answer; else A = a hash of the entry, never zero. C is preserved.
+;    Out: Cy = 1 if the slot is empty, holds a ROM (A = 1), or the FujiNet
+;         did not answer (A = 0); else A = a hash of the entry, never zero.
+;         C is preserved.
 ;
-;    An entry is the host slot (FFh if empty), the mode and the file name.
-;    A ROM is in a slot too, but has no sectors to read.
+;    Answered from the cache while it is under CACHE_JIFFIES old, so a
+;    change of image shows up that much later at most.
 
 SLOT_ENTRY:
+	ld	a,(iy+W_CACHED)
+	or	a
+	jr	z,SE_REFRESH
+	push	bc
+	ld	hl,(JIFFY)
+	ld	e,(iy+W_CACHE_TIME)
+	ld	d,(iy+W_CACHE_TIME+1)
+	or	a
+	sbc	hl,de		; HL = age of the cache
+	ld	de,CACHE_JIFFIES
+	or	a
+	sbc	hl,de
+	pop	bc
+	jr	c,SE_CACHED
+
+SE_REFRESH:
 	push	bc
 	ld	(iy+P_DEVICE),FUJI_DEVICEID_FUJINET
 	ld	(iy+P_COMMAND),FUJICMD_READ_DEVICE_SLOTS
@@ -408,13 +432,65 @@ SLOT_ENTRY:
 	ld	(iy+P_LENGTH+1),SLOTS_REPLY / 256
 	ld	a,UNAPI_READ
 	call	FUJI_CALL
+	jr	nc,SE_FILL
+	ld	(iy+W_CACHED),0
 	pop	bc
-	jr	nc,SE_TABLE
 	xor	a
 	scf
 	ret
 
-SE_TABLE:
+SE_FILL:
+	ld	c,DEV_COUNT
+SE_FILL_LOOP:
+	call	SE_PARSE
+	call	CACHE_ADDR
+	ld	(hl),a
+	dec	c
+	jr	nz,SE_FILL_LOOP
+	ld	hl,(JIFFY)
+	ld	(iy+W_CACHE_TIME),l
+	ld	(iy+W_CACHE_TIME+1),h
+	ld	(iy+W_CACHED),1
+	pop	bc
+
+SE_CACHED:
+	call	CACHE_ADDR
+	ld	a,(hl)
+	or	a
+	scf
+	ret	z		; empty
+	cp	CACHE_ROM
+	jr	z,SE_IS_ROM
+	or	a		; a disk: Cy = 0, A = the hash
+	ret
+SE_IS_ROM:
+	ld	a,1
+	scf
+	ret
+
+;--- HL = device C's cache entry
+
+CACHE_ADDR:
+	push	de
+	push	iy
+	pop	hl
+	ld	de,W_CACHE-1
+	add	hl,de
+	ld	e,c
+	ld	d,0
+	add	hl,de
+	pop	de
+	ret
+
+;--- Device C's entry in the table in the work buffer
+;    Out: A = 0 if the slot is empty, CACHE_ROM if it holds a ROM, else a
+;         hash of the entry (odd). C is preserved.
+;
+;    An entry is the host slot, the mode and the file name. An empty slot
+;    has host slot FFh, or keeps a host slot with no file name. A ROM is in
+;    a slot too, but has no sectors to read.
+
+SE_PARSE:
 	call	BUFFER_ADDR
 	ld	de,SLOT_ENTRY_LEN
 	ld	b,c
@@ -426,8 +502,14 @@ SE_FIND:
 
 	ld	a,(hl)
 	inc	a
-	scf
-	ret	z
+	ret	z		; host slot FFh: empty, A = 0
+	inc	hl
+	inc	hl
+	ld	a,(hl)
+	dec	hl
+	dec	hl
+	or	a
+	ret	z		; no file name: empty too, A = 0
 
 	push	hl
 	ld	b,SLOT_ENTRY_LEN
@@ -455,12 +537,10 @@ SE_DOT:
 	djnz	SE_DOT
 SE_DISK:
 	ld	a,e
-	or	a
 	ret
 
 SE_ROM:
-	ld	a,1
-	scf
+	ld	a,CACHE_ROM
 	ret
 
 ;--- Z if HL points at "rom" (any case) and the end of the name
@@ -570,6 +650,7 @@ RW_OK:
 ;    nothing in the reply tells either from a FujiNet that did not answer.
 
 RW_FAILED:
+	ld	(iy+W_CACHED),0	; the slot may have changed: look again next time
 	ld	a,E_NRDY
 	bit	0,(iy+W_WRITE)
 	jr	z,RW_ERR

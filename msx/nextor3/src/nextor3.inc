@@ -26,3 +26,4 @@ E_IDEVN:	equ	0B5h
 RDSLT:		equ	000Ch
 CALSLT:		equ	001Ch
 EXPTBL:		equ	0FCC1h
+JIFFY:		equ	0FC9Eh
