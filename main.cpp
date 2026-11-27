@@ -138,10 +138,11 @@ static bool __noinline __time_critical_func(serial_read)(uint32_t event, io_wo_3
   return true;
 }
 
-#define EVENT_INLINING __attribute__((noinline, section(".time_critical.event")))
+#define EVENT_FUNC __attribute__((noinline, section(".time_critical.event")))
+#define NEXT_EVENT return
 #else
 #define disk_run() do {} while (0)
-#define EVENT_INLINING __attribute__((always_inline))
+#define NEXT_EVENT continue
 #endif
 
 #ifdef COCO_BOARD
@@ -287,12 +288,16 @@ void __time_critical_func(romulan)(void)
 
   setup_pio_irq_logic();
 
-  // One bus event. Out of line where the loop below answers the urgent
-  // reads itself, so that the loop keeps its registers.
-  auto event = [&](BusSignals bus) EVENT_INLINING -> void {
+#ifdef HALT_PIN
+  // One bus event, out of line so that the loop below keeps its registers.
+  auto event = [&](BusSignals bus) EVENT_FUNC -> void {
+#else
+  while (true) {
+    bus.combined = pio_get_fifo(PSM_BUS);
+#endif
 #if !defined(BOARD_picorom_coco) && !defined(BOARD_coco_proto_260402)
     if (bus.combined == last_bus_state)
-      return;
+      NEXT_EVENT;
 #endif
 
 #if 0
@@ -330,7 +335,7 @@ void __time_critical_func(romulan)(void)
       else if (mapper.isRemap(bus))
         cart_remap(bus);
       last_bus_state = bus.combined;
-      return;
+      NEXT_EVENT;
     }
     // The bus loop answers the controller's reads.
     if (CoCoDisk::isSelected(bus) && Mapper::isWrite(bus))
@@ -339,7 +344,7 @@ void __time_critical_func(romulan)(void)
     if (Mapper::isWrite(bus) && !(IO_BASE <= bus.addr && bus.addr < IO_TOP)) {
       last_bus_state = bus.combined;
       disk_run();
-      return;
+      NEXT_EVENT;
     }
 #endif
 
@@ -427,9 +432,9 @@ void __time_critical_func(romulan)(void)
 
     last_bus_state = bus.combined;
     disk_run();
+#ifdef HALT_PIN
   };
 
-#ifdef HALT_PIN
   // Register and disk ROM reads are answered here: at 1.78MHz a register
   // reply has nothing to spare, and code running from the ROM reads on
   // every cycle. Leaving the loop would make the next reply late.
@@ -479,9 +484,6 @@ void __time_critical_func(romulan)(void)
     event(bus);
   }
 #else
-  while (true) {
-    bus.combined = pio_get_fifo(PSM_BUS);
-    event(bus);
   }
 #endif
 
