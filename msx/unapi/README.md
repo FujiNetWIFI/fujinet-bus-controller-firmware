@@ -12,6 +12,7 @@ adapter's IO window, so programs anywhere in the machine can reach the FujiNet.
 | `src/do_extbio.s` | EXTBIO handler: answers UNAPI discovery and dispatches calls |
 | `src/unapi_entry.s` | UNAPI routine dispatcher |
 | `src/fuji_call.c`, `fuji_call.h`, `fuji_call.inc` | Builds FujiBus packets and exchanges them with the FujiNet |
+| `src/checksum.s` | `fuji_calc_checksum`: the FujiBus checksum over one buffer, seeded to continue across two |
 | `src/subslot.s` | `io_window_enter`/`io_window_exit`: maps our own subslot into page 2 so the IO window is decoded |
 | `src/port_*.s`, `portio.h`, `portio.inc` | Byte and SLIP-framed IO through the window |
 | `src/timeout.s` | Loop-counted timeouts for the port routines |

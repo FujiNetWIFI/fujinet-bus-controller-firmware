@@ -32,6 +32,9 @@ extern uint8_t fuji_unapi_call(uint8_t func, FujiNetParams *params);
 extern uint8_t __FASTCALL__ fujiF5_write(FujiNetParams *params);
 extern uint8_t __FASTCALL__ fujiF5_read(FujiNetParams *params);
 
+/* checksum.s: seed is 0, or the result for the packet's first buffer. */
+extern uint8_t __CALLEE__ fuji_calc_checksum(const void *buf, uint16_t len, uint8_t seed);
+
 /* subslot.s: io_window_enter's result goes back to io_window_exit. */
 extern uint8_t io_window_enter(void);
 extern void __FASTCALL__ io_window_exit(uint8_t saved);

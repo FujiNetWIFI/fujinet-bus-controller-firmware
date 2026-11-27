@@ -97,16 +97,6 @@ static void msx_set_page_slot(uint8_t page, uint8_t slot)
   outp(0xA8, slots);
 }
 
-static uint16_t fuji_calc_checksum(const void *ptr, uint16_t len, uint16_t seed)
-{
-  uint16_t idx, chk;
-  uint8_t *buf = (uint8_t *) ptr;
-
-  for (idx = 0, chk = seed; idx < len; idx++)
-    chk = ((chk + buf[idx]) >> 8) + ((chk + buf[idx]) & 0xFF);
-  return chk;
-}
-
 /*--- SLIP-encode a fujibus_packet over the IO window and read back the
  *    reply. `func` is FUJI_CALL_WRITE or FUJI_CALL_READ. io_window_enter/
  *    exit handle the subslot register and are no-ops if not expanded.
@@ -189,7 +179,6 @@ static uint8_t fuji_packet_call(uint8_t func, fujibus_packet *packet_ptr,
   ck2 = fuji_calc_checksum(packet_ptr, sizeof(packet_ptr->header), 0);
   if (func == FUJI_CALL_READ)
     ck2 = fuji_calc_checksum(pbuf, rlen - sizeof(packet_ptr->header), ck2);
-  ck2 = (uint8_t) ck2;
 
   if (ck1 != ck2) {
 #ifdef DEBUG
