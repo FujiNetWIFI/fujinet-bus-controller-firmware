@@ -1,0 +1,49 @@
+# msx/nextor3
+
+A Nextor 3.0 kernel ROM whose driver makes the FujiNet disk slots Nextor
+devices: device 1 is slot 1, up to slot 6, the slots CONFIG shows.
+
+## Layout
+
+| File | Defines |
+|------|---------|
+| `src/driver.asm` | The driver bank: driver and device queries, sector reads and writes |
+| `src/nextor3.inc` | Kernel, BIOS and result-code constants |
+| `Makefile` | Downloads the kernel base file and puts the ROM together |
+
+## Build
+
+`make nextor-rom` at the top level builds `build/nextor3/nextor3.rom`, a
+128K ASCII16 image. It needs z88dk. The first build downloads Konamiman's
+kernel base file into `build/nextor3/base/`. The ROM is put together as
+section 3.1 of the Nextor 3.0 Driver Development Guide describes, so no
+`mknexrom` is needed.
+
+## How it fits
+
+The msx_proto_260402 firmware serves it from subslot 2 of the cartridge
+when a ROM mode command sets bit 1 ($3E alone, $3F beside the user ROM).
+The image is part of the firmware's data, held in RAM beside the user ROM
+pool, so it never shares the pool with a user ROM. Each mode command that
+enables it puts its banks back to their power-on state. With Nextor and no
+user ROM, subslot 0 is left empty so CONFIG does not run again.
+
+The driver has no transport of its own. It finds the UNAPI ROM in subslot 1
+by the `FUJINET` tag at 4010h and calls the fixed entry at 4018h through
+`CALSLT`. Interrupts stay off for each call, since `CALSLT` has the kernel
+out of page 1. The parameter block and a 512 byte bounce buffer, for
+transfers that reach into page 2, are in the page 3 work area the kernel
+allocates.
+
+## Devices
+
+- Availability comes from the device slot table: a slot with nothing in it,
+  or holding a ROM, is offline.
+- A slot holding a ROM is flagged as not for automapping, so it gets no
+  drive at boot and the disks around it keep consecutive letters.
+- A media change is a change in a slot's table entry. Remounting the same
+  image is not seen as one.
+- Images report no size; FujiNet doesn't give one.
+- Devices are flagged as unsuitable for Nextor's persistent storage, which
+  would otherwise write `_NEXTOR.PSF` onto whatever image is mounted.
+- A failed read is `.NRDY`, a failed write `.WPROT`: a NAK doesn't say which.
