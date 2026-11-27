@@ -2,20 +2,6 @@
         public  _port_getbuf_slip_dual
 
 ;-----------------------------------------------------------------------------
-; Macro to wait for a character with timeout
-; On entry: HL is timeout
-; On exit : A = received byte
-; Destroys: F, HL
-;-----------------------------------------------------------------------------
-SLIPD_WAIT_CHAR macro timeout_label
-        call    _port_getc_timeout
-        ld      a,h             ; check high byte
-        or      a
-        jr      nz,timeout_label        ; if high byte is set then timed out
-        ld      a,l
-ENDM
-
-;-----------------------------------------------------------------------------
 ; uint16_t port_getbuf_slip_dual(void *hdr_buf,  uint16_t hdr_len,
 ;                                void *data_buf, uint16_t data_len,
 ;                                uint16_t timeout)
@@ -37,6 +23,9 @@ ENDM
 ;       Anything else     -> store as-is
 ;   First hdr_len decoded bytes -> hdr_buf
 ;   Remaining decoded bytes     -> data_buf (up to data_len bytes)
+;
+; The timeout restarts for each byte, and only runs while the port is
+; empty: a byte already waiting is read straight from the IO window.
 ;
 ; Stack on entry (left-to-right push, rightmost param nearest SP):
 ;   (SP+0)  = return address
@@ -80,8 +69,6 @@ _port_getbuf_slip_dual:
         add     ix, sp                  ; IX is now our stable base for parameters
         ld      iy, 0                   ; IY is total bytes written
 
-        ld      de,(ix + SLIPD_PARAM_HDR_BUF)   ; DE is buffer pointer
-
         ; Check for zero total length
         ld      hl,(ix + SLIPD_PARAM_HDR_LEN)
         ld      a, h
@@ -89,22 +76,22 @@ _port_getbuf_slip_dual:
         ld      hl,(ix + SLIPD_PARAM_DATA_LEN)
         or      h
         or      l
-        jp      z, slipd_done           ; Both zero -- skip timeout_init entirely
+        jp      z, slipd_done           ; Both zero -- nothing to receive
 
-        ld      de,(ix + SLIPD_PARAM_HDR_BUF)
-        ld      bc,(ix + SLIPD_PARAM_HDR_LEN)
+        ld      de,(ix + SLIPD_PARAM_HDR_BUF)   ; DE is buffer pointer
+        ld      bc,(ix + SLIPD_PARAM_HDR_LEN)   ; BC is room left in it
 
         ; Phase 1: Sync to frame - discard until SLIP_END
 slipd_sync:
-        ld      hl,(ix + SLIPD_PARAM_TIMEOUT)   ; get timeout into HL
-        SLIPD_WAIT_CHAR slipd_done
+        call    slipd_getc
+        jr      c, slipd_done
         cp      SLIP_END
         jr      nz, slipd_sync
 
         ; Phase 2: Skip additional SLIP_END bytes
 slipd_skip_end:
-        ld      hl,(ix + SLIPD_PARAM_TIMEOUT)   ; get timeout into HL
-        SLIPD_WAIT_CHAR slipd_done
+        call    slipd_getc
+        jr      c, slipd_done
         cp      SLIP_END
         jr      z, slipd_skip_end
 
@@ -139,17 +126,13 @@ slipd_store_byte:
         ld      (ix + SLIPD_PARAM_DATA_LEN+1), 0
 
 slipd_read_next:
-        ; Reload the timeout: _port_getc_timeout returns it clobbered in HL, so
-        ; without this each byte after the first inherits the previous byte's
-        ; value as its own timeout (0 = no wait at all). Only shows up when
-        ; bytes arrive with gaps, decoding the frame short.
-        ld      hl,(ix + SLIPD_PARAM_TIMEOUT)
-        SLIPD_WAIT_CHAR slipd_done
-        jr      slipd_decode_loop
+        call    slipd_getc
+        jr      nc, slipd_decode_loop
+        jr      slipd_done
 
 slipd_handle_escape:
-        ld      hl,(ix + SLIPD_PARAM_TIMEOUT)   ; same as above
-        SLIPD_WAIT_CHAR slipd_done      ; Read byte after ESC
+        call    slipd_getc              ; Read byte after ESC
+        jr      c, slipd_done
 
         cp      SLIP_ESC_END            ; 0xDC -> 0xC0
         jr      nz, slipd_check_esc_esc
@@ -178,4 +161,29 @@ slipd_done:
 
         push    bc                      ; Put return address back
         ld      hl, de                  ; Return bytes written
+        ret
+
+;-----------------------------------------------------------------------------
+; slipd_getc: the next byte from the IO window
+; In:  IX = parameter base (for the timeout)
+; Out: Cy = 0 and A = byte, or Cy = 1 if the timeout ran out first
+; Preserves BC, DE, IX, IY. Destroys HL.
+;-----------------------------------------------------------------------------
+
+slipd_getc:
+        ld      a,(IO_STATUS)
+        add     a,a                     ; Cy = bit 7: a byte is waiting
+        jr      nc, slipd_getc_wait
+        ld      a,(IO_GETC)
+        or      a                       ; Cy = 0
+        ret
+
+slipd_getc_wait:
+        ld      hl,(ix + SLIPD_PARAM_TIMEOUT)
+        call    _port_getc_timeout      ; preserves BC and DE
+        ld      a, h
+        or      a                       ; Cy = 0
+        ld      a, l
+        ret     z                       ; got a byte
+        scf                             ; timed out
         ret
