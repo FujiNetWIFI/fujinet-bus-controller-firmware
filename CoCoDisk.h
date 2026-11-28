@@ -41,6 +41,13 @@ public:
     refresh();
   }
 
+  // Address and direction in one test.
+  static inline bool isRegisterRead(BusSignals bus) {
+    constexpr uint32_t READ = 1u << RW_PIN;
+    return (bus.combined & (READ | (uint16_t) ~WD1773::REG_MASK))
+      == (READ | FDC_BASE);
+  }
+
   static inline bool isSelected(BusSignals bus) {
     return (bus.addr & (uint16_t) ~WD1773::REG_MASK) == FDC_BASE
       || (bus.addr == DISK_LATCH && !bus.rw);
@@ -99,11 +106,16 @@ public:
   // is the only place to advance the controller while it does; see run().
   inline void afterRomRead() {
     _fromRom = true;
-    if (_pending || _fdc.due(time_us_32()))
+    if (_pending || (_fdc.active() && _fdc.due(time_us_32())))
       piece();
   }
 
-  // Called once every bus event has been dealt with, until the next one.
+  // False while there is nothing for run() to do. A set latch counts: RESET
+  // has to clear it.
+  inline bool busy() const { return _fdc.active() || _pending || _haltLow || _latch; }
+
+  // Called while busy(), once every bus event has been dealt with, until
+  // the next one.
   //
   // A late reply is lost or lands on a later cycle, so nothing may be in
   // progress when a read of the cart arrives. The controller is only
@@ -117,8 +129,9 @@ public:
   //    for software that starts a command and waits for the NMI. The quiet
   //    must far exceed the gap between polls in a wait loop (Disk BASIC:
   //    about 85 cycles).
-  // A piece starts GUARD loop passes after E rises with no select announced.
-  static constexpr unsigned GUARD = 3;
+  // A piece starts GUARD_CYCLES system clocks after E rises with no select
+  // announced.
+  static constexpr uint32_t GUARD_CYCLES = 80;
   static constexpr uint32_t HALT_SETTLE_US = 40;
   static constexpr unsigned QUIET_CYCLES = 2048;
 
@@ -127,30 +140,32 @@ public:
     if (_haltLow)
       whileHalted();
 
-    bool wasHigh = true;
-    unsigned highFor = 0, quiet = 0;
+    unsigned quiet = 0;
 
-    // HALT keeps the loop alive: a halted CPU makes no bus events of its
-    // own, so a reset that should release it would otherwise go unnoticed.
-    while ((_fdc.active() || _pending || _haltLow) && busQuiet()) {
-      if (!gpio_get(CLOCK_PIN)) {
-        wasHigh = false;
-        highFor = 0;
-      }
-      else if (!wasHigh) {
-        wasHigh = true;
-        highFor = 1;
-      }
-      else if (highFor && ++highFor > GUARD) {
-        highFor = 0;
-        watchReset();
-        if (_haltLow)
-          whileHalted();
-        else if (quiet < QUIET_CYCLES)
-          quiet++;
-        else if (_pending || _fdc.due(time_us_32()))
-          piece();
-      }
+    // Each wait tests the event queue and one other thing per pass: an
+    // event waits for the pass to end, and a register reply can't.
+    while (true) {
+      while (gpio_get(CLOCK_PIN))
+        if (!busQuiet())
+          return;
+      while (!gpio_get(CLOCK_PIN))
+        if (!busQuiet())
+          return;
+      uint32_t rose = m33_hw->dwt_cyccnt;
+      while (m33_hw->dwt_cyccnt - rose < GUARD_CYCLES)
+        if (!busQuiet())
+          return;
+      // HALT keeps the loop alive: a halted CPU makes no bus events of its
+      // own, so a reset that should release it would otherwise go unnoticed.
+      if (!busQuiet() || !(_fdc.active() || _pending || _haltLow))
+        return;
+      watchReset();
+      if (_haltLow)
+        whileHalted();
+      else if (quiet < QUIET_CYCLES)
+        quiet++;
+      else if (_pending || _fdc.due(time_us_32()))
+        piece();
     }
   }
 
@@ -335,6 +350,7 @@ DISK_FUNC void CoCoDisk::piece()
 class CoCoDisk {
 public:
   void init() {}
+  inline bool busy() const { return false; }
   template <typename T> static inline bool isSelected(T) { return false; }
   inline uint8_t peek(uint16_t) const { return 0; }
   inline void afterRead(uint16_t) {}
