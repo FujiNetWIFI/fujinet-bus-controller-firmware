@@ -50,6 +50,8 @@ public:
     return;
   }
 
+  inline unsigned wrapOffset(void) { return sizeof(_romData) - _selectedSegment * ROM_SEG_SIZE; }
+
   inline bool isClosed(void) { return _writePos < 0; }
   inline bool isActive(void) { return activeBase != nullptr; }
 };
