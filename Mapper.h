@@ -39,7 +39,9 @@
   accessed through more than one range of CPU addresses.
 */
 
+#define MAX_ADDRESS 0x10000u
 #define MAX_WINDOWS 8
+#define MAX_MIRRORS 8
 #define MAX_PAGES 64 // finest window the offset table can hold: 1K
 
 class Mapper
@@ -61,7 +63,7 @@ private:
   uint16_t windowSize = ROM_SEG_SIZE;
   uint16_t windowShift = __builtin_ctz(ROM_SEG_SIZE);
 
-  std::array<MapperMirror, MAX_WINDOWS> mirrors;
+  std::array<MapperMirror, MAX_MIRRORS> mirrors;
   unsigned mirrorCount = 0;
 
   unsigned windowBase = UINT_MAX, windowTop = 0;
@@ -83,7 +85,7 @@ private:
   }
 
   inline void resolve(unsigned base, unsigned top) {
-    for (unsigned addr = base; addr < std::min(top, 0x10000u); addr += windowSize)
+    for (unsigned addr = base; addr < std::min(top, MAX_ADDRESS); addr += windowSize)
       delta[addr >> windowShift] = windowOffset(addr) - addr;
     return;
   }
@@ -306,9 +308,16 @@ public:
     return;
   }
 
-  void addWindow(MapperWindow window) {
+  error_is_true addWindow(MapperWindow window) {
+    if (windowCount >= MAX_WINDOWS)
+      RETURN_ERROR_AS_TRUE();
+
     // FIXME - keep windows sorted by window_base
     windows[windowCount] = window;
+
+    uint16_t newWS = windows[0].window_top - windows[0].window_base;
+    if (newWS < (MAX_ADDRESS / MAX_PAGES))
+      RETURN_ERROR_AS_TRUE();
 
     extend(windowBase, windowTop,
            windows[windowCount].window_base, windows[windowCount].window_top);
@@ -318,13 +327,16 @@ public:
              windows[windowCount].reg_base, windows[windowCount].reg_top);
     }
 
-    windowCount += 1;
-    windowSize = windows[0].window_top - windows[0].window_base;
+    windowSize = newWS;
     windowShift = __builtin_ctz(windowSize);
-    return;
+    windowCount += 1;
+    RETURN_SUCCESS_AS_FALSE();
   }
 
-  void addMirror(MapperMirror mirror) {
+  error_is_true addMirror(MapperMirror mirror) {
+    if (mirrorCount >= MAX_MIRRORS)
+      RETURN_ERROR_AS_TRUE();
+
     // FIXME - keep mirrors sorted by mirror_base
     mirrors[mirrorCount] = mirror;
 
@@ -332,7 +344,7 @@ public:
            mirrors[mirrorCount].mirror_base, mirrors[mirrorCount].mirror_top);
 
     mirrorCount += 1;
-    return;
+    RETURN_SUCCESS_AS_FALSE();
   }
 
   // Called by the bus loop when the user ROM is switched on. The barrier
@@ -343,7 +355,7 @@ public:
     for (unsigned idx = 0; idx < windowCount; idx++)
       windows[idx].bank = idx;
     if (windowCount)
-      resolve(0, 0x10000);
+      resolve(0, MAX_ADDRESS);
     else
       std::fill(std::begin(delta), std::end(delta), -(int32_t)BUS_ROM_BASE);
     return;

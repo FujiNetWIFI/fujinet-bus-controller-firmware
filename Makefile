@@ -1,6 +1,9 @@
 BOARD ?= picorom_msx
 
-ifneq ($(filter $(BOARD),picorom_coco coco_proto_260402),)
+ifeq ($(BOARD),coco_proto_260402)
+  # FujiDOS 1.0 release, RichStephens/fujidos-coco
+  ROM_IMAGE = fujidos.rom
+else ifeq ($(BOARD),picorom_coco)
   ROM_IMAGE = hdbdw3bc3.rom
 else
   ROM_IMAGE = config-msx.rom
@@ -17,7 +20,7 @@ ROM_H = $(BUILD_DIR)/rom.h
 UF2_BINARY = $(BUILD_DIR)/fujiversal_$(BOARD).uf2
 
 SRC = main.cpp board_defs.h setup_sm.cpp setup_sm.h FujiBusPacket.cpp	\
-      FujiBusPacket.h UserROM.h UserROM.cpp Mapper.h Subslot.h CoCoDisk.h	\
+      FujiBusPacket.h UserROM.h UserROM.cpp RingBuffer.h Mapper.h Subslot.h CoCoDisk.h	\
       WD1773.h WD1773.cpp SectorLink.h fujiDeviceID.h fujiCommandID.h	\
       diag_uart.cpp diag_uart.h $(ROM_H)
 
@@ -45,8 +48,10 @@ tests:
 	mkdir -p $(TEST_DIR)
 	$(CXX) -std=c++20 -Wall -Wextra -O2 -o $(TEST_DIR)/wd1773_test tests/wd1773_test.cpp WD1773.cpp
 	$(CXX) -std=c++20 -Wall -Wextra -O2 -o $(TEST_DIR)/sectorlink_test tests/sectorlink_test.cpp
+	$(CXX) -std=c++20 -Wall -Wextra -O2 -o $(TEST_DIR)/ringbuffer_test tests/ringbuffer_test.cpp
 	$(TEST_DIR)/wd1773_test
 	$(TEST_DIR)/sectorlink_test
+	$(TEST_DIR)/ringbuffer_test
 
 # Don't leave a truncated target behind when a recipe fails
 .DELETE_ON_ERROR:
