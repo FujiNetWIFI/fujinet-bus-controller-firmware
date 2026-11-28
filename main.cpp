@@ -1,6 +1,7 @@
 #include "setup_sm.h"
 #include "board_defs.h"
 #include "UserROM.h"
+#include "RingBuffer.h"
 #include "Mapper.h"
 #include "CoCoDisk.h"
 #include "FujiBusPacket.h"
@@ -81,11 +82,15 @@ pio_sm_t state_machine[3];
     x + 1; })
 
 #define RING_SIZE 1024
-#define ring_append(buf, in, x) ({buf[in] = x; in = (in + 1) % sizeof(buf); })
+// Replies share this ring with IO_PUTC bytes so a reply can't be sent in the
+// middle of a partly drained frame.
+RingBuffer<RING_SIZE> ring_tx;
+// Drops the byte if the ring is full: core1 can't be stalled, and waiting
+// here would starve the watchdog.
 #define check_tx() ({ \
       if (multicore_fifo_rvalid()) {                    \
         bus.combined = multicore_fifo_pop_blocking();   \
-        ring_append(ring_tx, ring_tx_in, bus.data);     \
+        ring_tx.put(bus.data);                          \
       }                                                 \
     })
 
@@ -372,6 +377,40 @@ void __time_critical_func(romulan)(void)
   return;
 }
 
+void tx_drain(void)
+{
+  if (ring_tx.isEmpty())
+    return;
+
+#ifdef USE_STDIO
+  putchar(ring_tx.peek());
+  ring_tx.consume(1);
+#else
+  unsigned contig = ring_tx.contiguous();
+
+  while (tud_cdc_write_available() < 1)
+    tud_task();
+
+  uint32_t room = tud_cdc_write_available();
+  uint32_t to_write = (contig < room) ? contig : room;
+  uint32_t written = tud_cdc_write(ring_tx.readPtr(), to_write);
+  tud_cdc_write_flush();
+  ring_tx.consume(written);
+#endif // USE_STDIO
+}
+
+// Waits for room rather than dropping: a truncated reply desyncs the link.
+void tx_enqueue(const uint8_t *data, size_t length)
+{
+  while (length--) {
+    while (ring_tx.put(*data).is_error()) {
+      tx_drain();
+      tud_task();
+    }
+    data++;
+  }
+}
+
 void sendReplyPacket(fujiDeviceID_t source, bool ack, void *data, size_t length)
 {
   FujiBusPacket packet(source, ack ? CMD::FUJI_ACK : CMD::FUJI_NAK,
@@ -381,15 +420,7 @@ void sendReplyPacket(fujiDeviceID_t source, bool ack, void *data, size_t length)
   DEBUG_PRINTF("Sending reply: dev:%02x cmd:%02x len:%04x\n",
                packet.device(), packet.command(), encoded.size());
 #endif // VERBOSE_DEBUG
-#ifdef USE_STDIO
-  fwrite(encoded.data(), 1, encoded.size(), stdout);
-  fflush(stdout);
-#else
-  tud_cdc_write(encoded.data(), (uint32_t) encoded.size());
-  tud_cdc_write_flush();
-  while (tud_cdc_write_available() < CFG_TUD_CDC_TX_BUFSIZE)
-    tud_task();
-#endif // USE_STDIO
+  tx_enqueue(encoded.data(), encoded.size());
 #if VERBOSE_DEBUG
   DEBUG_PRINTF("Sent\n");
 #endif // VERBOSE_DEBUG
@@ -512,9 +543,7 @@ int main()
   BusSignals bus;
   int input;
   unsigned int count = 0;
-  unsigned char ring_rx[RING_SIZE], ring_tx[RING_SIZE];
-  unsigned ring_rx_in = 0, ring_rx_out = 0;
-  unsigned ring_tx_in = 0, ring_tx_out = 0;
+  RingBuffer<RING_SIZE> ring_rx;
   uint32_t last_cc_seen = 0, last_ring_sent = 0, now, loop_begin;
   bool our_command = false, serial_ready = false;
   ByteBuffer command_buf;
@@ -596,7 +625,7 @@ int main()
     // The link shares the wire with the CoCo's own DriveWire traffic, and
     // the host handles one request at a time: wait for that traffic to stop.
     if (disk.link.active()
-        || (ring_tx_in == ring_tx_out && now - last_dw_seen >= DW_IDLE_MS))
+        || (ring_tx.isEmpty() && now - last_dw_seen >= DW_IDLE_MS))
       link_send(link_out, disk.link.poll(now, link_out));
 
     check_tx();
@@ -608,13 +637,13 @@ int main()
         DEBUG_PRINTF("Command timeout %d\r\n", command_buf.size());
 #endif // VERBOSE_DEBUG
         for (char c : command_buf)
-          ring_append(ring_rx, ring_rx_in, (uint8_t) c);
+          ring_rx.put((uint8_t) c);
         command_buf.clear();
       }
     }
 
     tud_task();
-    if ((ring_rx_in + 1) % RING_SIZE != ring_rx_out || now - last_ring_sent > 10) {
+    if (!ring_rx.isFull() || now - last_ring_sent > 10) {
 #ifdef LED_PIN
       //gpio_put(LED_PIN, 0);
 #endif
@@ -626,7 +655,7 @@ int main()
         if (disk.link.active())
           link_send(link_out, disk.link.receive(rc, link_out));
         else if (!command_buf.size() && input != SLIP_END) {
-          ring_append(ring_rx, ring_rx_in, input);
+          ring_rx.put(input);
           last_dw_seen = now;
         }
         else {
@@ -644,13 +673,13 @@ int main()
               DEBUG_PRINTF("Command not us\r\n");
 #endif // VERBOSE_DEBUG
               for (char c : command_buf)
-                ring_append(ring_rx, ring_rx_in, (uint8_t) c);
+                ring_rx.put((uint8_t) c);
               command_buf.clear();
             }
             else if (command_size > 1 && input == SLIP_END) {
               if (!process_command(command_buf)) {
                 for (char c : command_buf)
-                  ring_append(ring_rx, ring_rx_in, (uint8_t) c);
+                  ring_rx.put((uint8_t) c);
               }
               command_buf.clear();
             }
@@ -665,33 +694,17 @@ int main()
 #endif
     }
 
-    if (ring_rx_in != ring_rx_out) {
-      bool sent = multicore_fifo_push_timeout_us(ring_rx[ring_rx_out], 0);
+    if (!ring_rx.isEmpty()) {
+      bool sent = multicore_fifo_push_timeout_us(ring_rx.peek(), 0);
       if (sent) {
-        ring_rx_out = (ring_rx_out + 1) % sizeof(ring_rx);
+        ring_rx.consume(1);
         last_ring_sent = now;
       }
     }
 
-    if (serial_ready && ring_tx_in != ring_tx_out && !disk.link.active()) {
+    if (serial_ready && !ring_tx.isEmpty() && !disk.link.active()) {
       last_dw_seen = now;
-#ifdef USE_STDIO
-      putchar(ring_tx[ring_tx_out]);
-      ring_tx_out = (ring_tx_out + 1) % sizeof(ring_tx);
-#else
-      unsigned contig = (ring_tx_in > ring_tx_out)
-        ? (ring_tx_in - ring_tx_out)
-        : (sizeof(ring_tx) - ring_tx_out);
-
-      while (tud_cdc_write_available() < 1)
-        tud_task();
-
-      uint32_t room = tud_cdc_write_available();
-      uint32_t to_write = (contig < room) ? contig : room;
-      uint32_t written = tud_cdc_write(&ring_tx[ring_tx_out], to_write);
-      tud_cdc_write_flush();
-      ring_tx_out = (ring_tx_out + written) % sizeof(ring_tx);
-#endif // USE_STDIO
+      tx_drain();
     }
   }
 
