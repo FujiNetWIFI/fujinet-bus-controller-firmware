@@ -17,6 +17,8 @@ FUJI_DEVICEID_FUJINET:	equ	70h	; the control device
 FUJICMD_READ:		equ	'R'
 FUJICMD_WRITE:		equ	'W'
 FUJICMD_READ_DEVICE_SLOTS: equ	0F2h
+FUJICMD_PERCOM_READ:	equ	'N'	; the mounted image's geometry
+PERCOM_LEN:		equ	12
 FUJI_FIELD_C1234:	equ	7	; one 32 bit value
 
 DEV_COUNT:		equ	6
@@ -24,6 +26,16 @@ SLOT_ENTRY_LEN:		equ	38	; host slot, mode, file name
 SLOTS_REPLY:		equ	SLOT_ENTRY_LEN*8	; the FujiNet sends all eight
 
 SECTOR_SIZE:		equ	512
+
+;--- An image is a floppy when its geometry fits one; anything bigger, or
+;    with no geometry, is a hard disk and gets the partition search.
+
+FLOPPY_MAX_TRACKS:	equ	84
+FLOPPY_MAX_SPT:		equ	36
+
+;--- What FORMAT writes: the MSX-DOS 1 layout of a 360K or 720K disk
+
+FMT_ROOT_SECTORS:	equ	7	; 112 entries
 
 ;--- The slot table is fetched at most this often: the kernel asks after a
 ;    device before most accesses, and the table is the same for all of them.
@@ -57,7 +69,13 @@ W_HASH:		equ	17	; DEV_COUNT: slot entries last reported
 W_CACHE:	equ	W_HASH+DEV_COUNT	; DEV_COUNT: entries, as SE_PARSE gives them
 W_CACHE_TIME:	equ	W_CACHE+DEV_COUNT	; word: JIFFY when the cache was filled
 W_CACHED:	equ	W_CACHE_TIME+2	; nonzero while the cache holds a table
-W_BUFFER:	equ	W_CACHED+1
+W_CYL:		equ	W_CACHED+1	; geometry GET_GEOM found
+W_HEADS:	equ	W_CYL+1
+W_SPT:		equ	W_HEADS+1
+W_TOTAL:	equ	W_SPT+1		; word: sectors
+W_MEDIA:	equ	W_TOTAL+2	; media ID and FAT sectors FORMAT writes
+W_SPF:		equ	W_MEDIA+1
+W_BUFFER:	equ	W_SPF+1
 WRK_SIZE:	equ	W_BUFFER+SECTOR_SIZE
 
 VER_MAIN:	equ	1
@@ -271,9 +289,13 @@ DEVICE_QUERY:
 	dec	a
 	jr	z,DV_PARAMS
 	dec	a
-	jr	z,DV_STATUS
+	jp	z,DV_STATUS
 	dec	a
-	jr	z,DV_AVAIL
+	jp	z,DV_AVAIL
+	dec	a
+	jp	z,DV_CHOICES
+	dec	a
+	jp	z,DV_FORMAT
 	jp	NOT_IMPL
 
 ;--- 1: information strings, manufacturer and device name
@@ -312,45 +334,273 @@ DV_MANUF:
 	ld	de,STR_MANUF
 	jp	OUT_STR
 
-;--- 2: device parameters. The image size isn't something FujiNet reports.
+;--- 2: device parameters. A floppy image reports its geometry and size;
+;    a hard disk image reports neither, since FujiNet gives no size for one.
 
 DV_PARAMS:
 	ld	a,h
 	or	l
 	ret	z		; A = RESULT_OK: just checking the device
 
+	push	hl
+	call	GET_WORK
+	xor	a
+	ld	(iy+W_CYL),a
+	ld	(iy+W_HEADS),a
+	ld	(iy+W_SPT),a
+	ld	(iy+W_TOTAL),a
+	ld	(iy+W_TOTAL+1),a
+
 	;--- A slot that is empty or holds a ROM is kept out of the partition
 	;    search, so it gets no drive at boot, the disks after it keep
 	;    consecutive letters, and searches don't read it. The flags follow the
 	;    slot, so a disk mounted there later is picked up.
 
-	push	hl
-	call	GET_WORK
 	call	SLOT_ENTRY
-	pop	hl
+	ld	e,09h		; removable, and not for automapping
+	jr	c,DV_PARAMS_FILL
 	ld	e,01h		; removable
-	jr	nc,DV_PARAMS_FILL
-	ld	e,09h		; and not for automapping
+	push	de
+	call	GET_GEOM
+	pop	de
+	jr	c,DV_PARAMS_FILL
+	ld	e,05h		; removable floppy
 DV_PARAMS_FILL:
+	pop	hl
 	ld	(hl),0		; block device
 	inc	hl
 	ld	(hl),SECTOR_SIZE & 0FFh
 	inc	hl
 	ld	(hl),SECTOR_SIZE / 256
 	inc	hl
-	ld	b,4
-DV_PARAMS_SIZE:
+	ld	a,(iy+W_TOTAL)
+	ld	(hl),a
+	inc	hl
+	ld	a,(iy+W_TOTAL+1)
+	ld	(hl),a
+	inc	hl
 	ld	(hl),0
 	inc	hl
-	djnz	DV_PARAMS_SIZE
+	ld	(hl),0
+	inc	hl
 	ld	(hl),e
 	inc	hl
-	ld	b,4
-DV_PARAMS_GEOM:
+	ld	a,(iy+W_CYL)
+	ld	(hl),a
+	inc	hl
 	ld	(hl),0
 	inc	hl
-	djnz	DV_PARAMS_GEOM
+	ld	a,(iy+W_HEADS)
+	ld	(hl),a
+	inc	hl
+	ld	a,(iy+W_SPT)
+	ld	(hl),a
 	xor	a
+	ret
+
+;--- The geometry of the image in device C, from the FujiNet's PERCOM block
+;    In:  C = device, IY = work area
+;    Out: Cy = 0 and W_CYL..W_TOTAL set if it is a floppy, else Cy = 1.
+;         C is preserved.
+
+GET_GEOM:
+	push	bc
+	ld	a,c
+	add	a,FUJI_DEVICEID_DISK-1
+	ld	(iy+P_DEVICE),a
+	ld	(iy+P_COMMAND),FUJICMD_PERCOM_READ
+	ld	(iy+P_DESCR),0
+	call	BUFFER_ADDR
+	ld	(iy+P_BUFFER),l
+	ld	(iy+P_BUFFER+1),h
+	ld	(iy+P_LENGTH),PERCOM_LEN
+	ld	(iy+P_LENGTH+1),0
+	ld	a,UNAPI_READ
+	call	FUJI_CALL
+	pop	bc
+	ret	c
+
+	call	BUFFER_ADDR
+	ld	a,(hl)		; tracks, 0 for more than 255
+	or	a
+	scf
+	ret	z
+	cp	FLOPPY_MAX_TRACKS+1
+	ccf
+	ret	c
+	ld	d,a
+	inc	hl
+	inc	hl
+	ld	a,(hl)		; sectors per track, big endian
+	or	a
+	scf
+	ret	nz
+	inc	hl
+	ld	a,(hl)
+	or	a
+	scf
+	ret	z
+	cp	FLOPPY_MAX_SPT+1
+	ccf
+	ret	c
+	ld	e,a
+	inc	hl
+	ld	a,(hl)		; sides less one
+	cp	2
+	ccf
+	ret	c
+	inc	a
+	ld	b,a
+	inc	hl
+	inc	hl
+	ld	a,(hl)		; sector size, big endian
+	cp	SECTOR_SIZE / 256
+	scf
+	ret	nz
+	inc	hl
+	ld	a,(hl)
+	or	a
+	scf
+	ret	nz
+
+	ld	(iy+W_CYL),d
+	ld	(iy+W_HEADS),b
+	ld	(iy+W_SPT),e
+	push	bc
+	ld	h,0
+	ld	l,e		; HL = sectors per track
+	dec	b
+	jr	z,GG_ONE_SIDE
+	add	hl,hl
+GG_ONE_SIDE:
+	ex	de,hl		; DE = sectors per cylinder, H = tracks
+	ld	b,h
+	ld	hl,0
+GG_MUL:
+	add	hl,de
+	djnz	GG_MUL
+	ld	(iy+W_TOTAL),l
+	ld	(iy+W_TOTAL+1),h
+	pop	bc
+	or	a
+	ret
+
+;--- 5: format choices. There is one: the layout the image's size calls for.
+
+DV_CHOICES:
+	call	GET_WORK
+	call	FMT_LAYOUT
+	jp	c,NOT_IMPL
+	ld	b,0
+	xor	a
+	ret
+
+;--- 6: format. Writes an MSX-DOS 1 boot sector, empty FATs and an empty
+;    root directory; in DOS 2 mode the kernel then writes its own boot sector.
+
+DV_FORMAT:
+	ld	a,b
+	dec	a
+	jp	nz,NOT_IMPL
+	call	GET_WORK
+	call	FMT_LAYOUT
+	jp	c,NOT_IMPL
+
+	call	CLEAR_BUF
+	ex	de,hl
+	push	bc
+	ld	hl,BOOT_SECTOR
+	ld	bc,BOOT_SECTOR_LEN
+	ldir
+	pop	bc
+	call	BUFFER_ADDR
+	ld	de,13h
+	add	hl,de
+	ld	a,(iy+W_TOTAL)
+	ld	(hl),a		; 13h: total sectors
+	inc	hl
+	ld	a,(iy+W_TOTAL+1)
+	ld	(hl),a
+	inc	hl
+	ld	a,(iy+W_MEDIA)
+	ld	(hl),a		; 15h: media ID
+	inc	hl
+	ld	a,(iy+W_SPF)
+	ld	(hl),a		; 16h: sectors per FAT
+	ld	de,4
+	add	hl,de
+	ld	a,(iy+W_HEADS)
+	ld	(hl),a		; 1Ah: heads
+	ld	de,0
+	call	WRITE_BUF
+	jr	c,DF_FAILED
+
+	;--- Both FATs and the root directory: zeros, but for the media ID
+	;    at the head of each FAT
+
+	ld	a,(iy+W_SPF)
+	add	a,a
+	add	a,FMT_ROOT_SECTORS
+	ld	b,a		; sectors to write
+	ld	de,1
+DF_LOOP:
+	push	bc
+	call	CLEAR_BUF
+	ld	a,e
+	dec	a
+	jr	z,DF_FAT_HEAD	; the first FAT
+	sub	(iy+W_SPF)
+	jr	nz,DF_WRITE	; not the second either
+DF_FAT_HEAD:
+	ld	a,(iy+W_MEDIA)
+	ld	(hl),a
+	inc	hl
+	ld	(hl),0FFh
+	inc	hl
+	ld	(hl),0FFh
+DF_WRITE:
+	call	WRITE_BUF
+	pop	bc
+	jr	c,DF_FAILED
+	inc	de
+	djnz	DF_LOOP
+	xor	a
+	ret
+
+;--- The query has no code for a failed write
+DF_FAILED:
+	ld	(iy+W_CACHED),0
+	jp	NOT_IMPL
+
+;--- The layout FORMAT writes for the image in device C
+;    Out: Cy = 0 and W_MEDIA and W_SPF set for a 360K or 720K image,
+;         else Cy = 1. C is preserved.
+
+FMT_LAYOUT:
+	call	GET_GEOM
+	ret	c
+	ld	a,(iy+W_TOTAL+1)
+	ld	l,(iy+W_TOTAL)
+	ld	de,0F802h	; 360K: media F8h, 2 sectors per FAT
+	cp	720 / 256
+	jr	nz,FL_720K
+	ld	a,l
+	cp	720 & 0FFh
+	jr	z,FL_SET
+FL_720K:
+	ld	a,(iy+W_TOTAL+1)
+	ld	de,0F903h	; 720K: media F9h, 3 sectors per FAT
+	cp	1440 / 256
+	scf
+	ret	nz
+	ld	a,l
+	cp	1440 & 0FFh
+	scf
+	ret	nz
+FL_SET:
+	ld	(iy+W_MEDIA),d
+	ld	(iy+W_SPF),e
+	or	a
 	ret
 
 ;--- 4: availability: whether a disk image is mounted in the slot
@@ -779,6 +1029,51 @@ GET_WORK:
 	pop	af
 	ret
 
+;--- Write the work buffer to sector DE of device C
+;    Out: Cy = 1 on failure. BC and DE are preserved.
+
+WRITE_BUF:
+	push	bc
+	push	de
+	ld	a,c
+	add	a,FUJI_DEVICEID_DISK-1
+	ld	(iy+P_DEVICE),a
+	ld	(iy+P_COMMAND),FUJICMD_WRITE
+	ld	(iy+P_DESCR),FUJI_FIELD_C1234
+	ld	(iy+P_AUX),e
+	ld	(iy+P_AUX+1),d
+	ld	(iy+P_AUX+2),0
+	ld	(iy+P_AUX+3),0
+	call	BUFFER_ADDR
+	ld	(iy+P_BUFFER),l
+	ld	(iy+P_BUFFER+1),h
+	ld	(iy+P_LENGTH),SECTOR_SIZE & 0FFh
+	ld	(iy+P_LENGTH+1),SECTOR_SIZE / 256
+	ld	a,UNAPI_WRITE
+	call	FUJI_CALL
+	pop	de
+	pop	bc
+	ret
+
+;--- Zero the work buffer
+;    Out: HL = the work buffer. BC and DE are preserved.
+
+CLEAR_BUF:
+	push	bc
+	push	de
+	call	BUFFER_ADDR
+	push	hl
+	ld	d,h
+	ld	e,l
+	inc	de
+	ld	(hl),0
+	ld	bc,SECTOR_SIZE-1
+	ldir
+	pop	hl
+	pop	de
+	pop	bc
+	ret
+
 ;--- HL = the work buffer
 
 BUFFER_ADDR:
@@ -811,6 +1106,27 @@ OS_LOOP:
 	ld	(hl),0
 	ld	a,RESULT_TRUNCATED_STRING
 	ret
+
+;--- What DV_FORMAT puts in sector 0 ahead of the total, media ID, FAT size
+;    and heads it fills in. The code at 1Eh returns, so an MSX-DOS 1 disk ROM
+;    boots to BASIC from it.
+
+BOOT_SECTOR:
+	defb	0EBh,0FEh,90h
+	defb	"FUJINET "
+	defw	SECTOR_SIZE
+	defb	2		; sectors per cluster
+	defw	1		; reserved sectors
+	defb	2		; FATs
+	defw	FMT_ROOT_SECTORS*SECTOR_SIZE/32
+	defw	0		; total sectors
+	defb	0		; media ID
+	defw	0		; sectors per FAT
+	defw	9		; sectors per track
+	defw	0		; heads
+	defw	0		; hidden sectors
+	ret
+BOOT_SECTOR_LEN:	equ	$-BOOT_SECTOR
 
 STR_TAG:
 	defb	"FUJINET",0

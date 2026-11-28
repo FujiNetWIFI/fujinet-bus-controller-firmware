@@ -47,5 +47,13 @@ allocates.
 - One fetch of the table answers for all six devices for about 2 seconds
   (120 frames), so a change of image can take that long to be seen. A
   failed read or write fetches it again on the next query.
-- Images report no size; FujiNet doesn't give one.
+- An image whose PERCOM geometry fits a floppy (up to 84 tracks, 2 sides
+  and 36 sectors per track of 512 bytes) is a floppy: it reports that
+  geometry and its size, and Nextor maps a drive to sector 0 with no
+  partition search. Anything else is a hard disk and reports no size, since
+  the PERCOM block gives none past 255 tracks.
+- FORMAT works on a 360K or 720K floppy image. It writes an MSX-DOS 1 boot
+  sector, empty FATs and an empty root directory, and leaves the data area
+  alone; in DOS 2 mode the kernel then writes its own boot sector. Other
+  floppy sizes can't be formatted.
 - A failed read is `.NRDY`, a failed write `.WPROT`: a NAK doesn't say which.
